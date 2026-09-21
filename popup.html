@@ -9,15 +9,13 @@
 <body class="bg-surface text-on-surface antialiased">
   <div class="app-container">
 
-    <!-- 1. HEADER BAR (36px high) -->
+    <!-- 1. HEADER BAR -->
     <header class="header-bar">
-      <!-- Left: Identity & Operational State -->
       <div class="header-brand">
         <span class="indicator-dot" aria-hidden="true"></span>
         <span class="header-title">FortiOS Security Auditor</span>
         <span class="version-badge">v1.0.0</span>
       </div>
-      <!-- Right: Audit Mode Badge -->
       <div class="header-controls">
         <span class="findings-badge" id="auditModeBadge">53 Controls (Full Audit)</span>
         <span id="detectBadge" class="sr-only" data-kind="none">No input</span>
@@ -25,114 +23,114 @@
       </div>
     </header>
 
-    <!-- 2. FILE STAGING BAR (Single Row, Max 60px) -->
-    <section class="staging-section">
-      <div id="dropZone" class="dropzone-box" tabindex="0" role="button" aria-label="Drop .log/.conf files or browse">
-        <input type="file" id="fileInput" class="file-input-hidden" multiple accept=".txt,.log,.conf,.cfg" />
-        
-        <div class="staging-left">
-          <div class="staging-prompt">
-            <svg class="staging-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
-            </svg>
-            <span class="prompt-text">Drop .log/.conf files or</span>
-            <button type="button" id="browseBtn" class="browse-link">browse</button>
+    <!-- 2. MAIN TABS -->
+    <nav class="main-tabs" role="tablist">
+      <button type="button" id="tabBtnAnalyzer" class="main-tab-btn is-active" role="tab" aria-selected="true">
+        <span id="tabLabelAnalyzer">Security Audit & Inspector</span>
+      </button>
+      <button type="button" id="tabBtnCheatsheet" class="main-tab-btn" role="tab" aria-selected="false">
+        <span id="tabLabelCheatsheet">Diagnostic CLI Cheat Sheet</span>
+      </button>
+    </nav>
+
+    <!-- ========================================== -->
+    <!-- VIEW: ANALYZER                             -->
+    <!-- ========================================== -->
+    <div id="viewAnalyzer" class="view-container">
+      
+      <!-- STAGING BAR -->
+      <section class="staging-section">
+        <div id="dropZone" class="dropzone-box" tabindex="0" role="button" aria-label="Drop .log/.conf files or browse">
+          <input type="file" id="fileInput" class="file-input-hidden" multiple accept=".txt,.log,.conf,.cfg" />
+          
+          <div class="staging-left">
+            <div class="staging-prompt">
+              <svg class="staging-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+              </svg>
+              <span id="dropzonePrimary" class="prompt-text">Drop .log/.conf files or <span class="browse-link">browse</span></span>
+            </div>
+            <div id="fileChipsWrapper" class="file-chips-wrapper"></div>
           </div>
 
-          <!-- File Chips Container (Dynamic) -->
-          <div id="fileChipsWrapper" class="file-chips-wrapper"></div>
+          <div class="staging-right">
+            <svg class="verified-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
+            </svg>
+            <span id="verifiedText" class="verified-text" title="Local Client-Side Only">Local Client-Side Only</span>
+          </div>
         </div>
 
-        <div class="staging-right">
-          <svg class="verified-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path fill-rule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
-          </svg>
-          <span id="verifiedText" class="verified-text" title="All configuration and CLI telemetry is parsed strictly within your local browser sandbox. Zero data exfiltration.">Local Client-Side Only</span>
-        </div>
-      </div>
+        <div id="fileListContainer" class="is-hidden" style="display:none;"><span id="fileListCount"></span><button id="clearAllFilesBtn"></button></div>
+        <div id="dropzoneSub" style="display:none;"></div>
+      </section>
 
-      <!-- Hidden compatibility wrappers -->
-      <div id="fileListContainer" class="is-hidden" style="display:none;">
-        <span id="fileListCount"></span>
-        <button type="button" id="clearAllFilesBtn"></button>
-      </div>
-      <div id="dropzonePrompt" style="display:none;">
-        <span id="dropzonePrimary"></span>
-        <span id="dropzoneSub"></span>
-      </div>
-    </section>
-
-    <!-- Collapsible Direct Terminal Input -->
-    <div class="terminal-drawer">
-      <button type="button" id="pasteToggleBtn" class="terminal-toggle" aria-expanded="false" aria-controls="pasteBody">
-        <div class="terminal-toggle-title">
-          <svg class="terminal-toggle-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
-          </svg>
-          <span id="pasteToggleText">Direct Paste / Terminal Session</span>
-        </div>
-        <span id="charCounter" class="char-counter">0 chars</span>
-      </button>
-      <div id="pasteBody" class="terminal-body is-collapsed">
-        <textarea id="cliInput" placeholder="Paste FortiGate/FortiAnalyzer CLI command outputs or FortiOS config backup text here..." spellcheck="false"></textarea>
-      </div>
-    </div>
-
-    <!-- 3. ACTION & OUTPUT CONTROL BAR -->
-    <section class="action-bar">
-      <!-- Left: Execute Action & Summary -->
-      <div class="action-bar-left">
-        <button type="button" id="analyzeBtn" class="btn-analyze">
-          <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 1.414L10.586 9H7a1 1 0 100 2h3.586l-1.293 1.293a1 1 0 101.414 1.414l3-3a1 1 0 000-1.414z" clip-rule="evenodd" />
-          </svg>
-          <span id="analyzeBtnText">Analyze Security</span>
+      <!-- TERMINAL DRAWER -->
+      <div class="terminal-drawer">
+        <button type="button" id="pasteToggleBtn" class="terminal-toggle" aria-expanded="false" aria-controls="pasteBody">
+          <div class="terminal-toggle-title">
+            <svg class="terminal-toggle-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
+            </svg>
+            <span id="pasteToggleText">Direct Paste / Terminal Session</span>
+          </div>
+          <span id="charCounter" class="char-counter">0 chars</span>
         </button>
-        <button type="button" id="clearBtn" class="btn-clear" title="Clear inputs and dashboard">
-          <span id="clearBtnText">Clear</span>
-        </button>
-        <div class="summary-indicator">
-          <span class="status-dot" aria-hidden="true"></span>
-          <span id="summaryCountText">0 files parsed · 0 checks evaluated</span>
+        <div id="pasteBody" class="terminal-body is-collapsed">
+          <textarea id="cliInput" placeholder="Paste FortiGate/FortiAnalyzer CLI command outputs or FortiOS config backup text here..." spellcheck="false"></textarea>
         </div>
       </div>
 
-      <!-- Right: View Mode Toggle & Quick Exports -->
-      <div class="action-bar-right">
-        <div class="view-toggle-group" role="tablist">
-          <button type="button" id="tab-btn-html" class="view-toggle-btn is-active" role="tab" aria-selected="true">HTML Report</button>
-          <button type="button" id="tab-btn-plain" class="view-toggle-btn" role="tab" aria-selected="false">Plain Text</button>
+      <!-- ACTION BAR -->
+      <section class="action-bar">
+        <div class="action-bar-left">
+          <button type="button" id="analyzeBtn" class="btn-analyze">
+            <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-8.707l-3-3a1 1 0 00-1.414 1.414L10.586 9H7a1 1 0 100 2h3.586l-1.293 1.293a1 1 0 101.414 1.414l3-3a1 1 0 000-1.414z" clip-rule="evenodd" />
+            </svg>
+            <span id="analyzeBtnText">Analyze Security</span>
+          </button>
+          <button type="button" id="clearBtn" class="btn-clear" title="Clear inputs and dashboard">
+            <span id="clearBtnText">Clear</span>
+          </button>
+          <div class="summary-indicator">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="summaryCountText">0 files parsed · 0 checks</span>
+          </div>
         </div>
-        <div class="export-btn-group">
-          <button type="button" id="copyRichTextBtn" class="icon-btn" title="Copy for Ticket / Documentation (Rich Text)" disabled>
-            <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
-              <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 2H9a3 3 0 01-3-2z" />
-            </svg>
-            <span id="btnTextRich" class="sr-only">Copy Rich Text</span>
-          </button>
-          <button type="button" id="downloadHtmlBtn" class="icon-btn" title="Download Standalone HTML Audit Report" disabled>
-            <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
-            </svg>
-            <span id="btnTextHtml" class="sr-only">HTML</span>
-          </button>
-          <button type="button" id="downloadTxtBtn" class="icon-btn" title="Download Text Audit Report (.txt)" disabled>
-            <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
-            </svg>
-            <span id="btnTextTxt" class="sr-only">TXT</span>
-          </button>
-          <button type="button" id="copyPlainTextBtn" class="sr-only" disabled tabindex="-1"><span id="btnTextPlain">Plain Text</span></button>
-        </div>
-      </div>
-    </section>
 
-    <!-- 4. DUAL WORKSPACE AREA -->
-    <main class="workspace-area">
-      <!-- HTML Workspace -->
+        <div class="action-bar-right">
+          <div class="view-toggle-group" role="tablist">
+            <button type="button" id="tab-btn-html" class="view-toggle-btn is-active" role="tab" aria-selected="true">HTML Report</button>
+            <button type="button" id="tab-btn-plain" class="view-toggle-btn" role="tab" aria-selected="false">Plain Text</button>
+          </div>
+          <div class="export-btn-group">
+            <button type="button" id="copyRichTextBtn" class="icon-btn" title="Copy for Ticket / Documentation (Rich Text)" disabled>
+              <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
+                <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 2H9a3 3 0 01-3-2z" />
+              </svg>
+              <span id="btnTextRich" class="sr-only">Copy Rich Text</span>
+            </button>
+            <button type="button" id="downloadHtmlBtn" class="icon-btn" title="Download Standalone HTML Audit Report" disabled>
+              <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
+              </svg>
+              <span id="btnTextHtml" class="sr-only">HTML</span>
+            </button>
+            <button type="button" id="downloadTxtBtn" class="icon-btn" title="Download Text Audit Report (.txt)" disabled>
+              <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
+              </svg>
+              <span id="btnTextTxt" class="sr-only">TXT</span>
+            </button>
+            <button type="button" id="copyPlainTextBtn" class="sr-only" disabled tabindex="-1"><span id="btnTextPlain">Plain Text</span></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- HTML WORKSPACE -->
       <div id="view-html" class="workspace-view">
-        <!-- Sub-bar: Status Metrics & Filter -->
         <div class="metrics-subbar">
           <div class="metrics-chips">
             <div class="metric-chip chip-pass">
@@ -165,7 +163,6 @@
           </div>
         </div>
 
-        <!-- Dense Table / Finding Cards -->
         <div class="table-container">
           <table id="resultsTable" class="dense-table">
             <thead>
@@ -180,6 +177,9 @@
               <tr class="empty-row">
                 <td colspan="4">
                   <div class="empty-state">
+                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
                     <p class="empty-title" id="emptyTitle">Ready for Security &amp; Hardening Audit</p>
                     <p class="empty-desc" id="emptyDesc">Drop FortiOS configuration backups (.conf/.cfg) or diagnostic CLI logs (.txt/.log) above, then click <strong>Analyze Security</strong>.</p>
                   </div>
@@ -190,7 +190,7 @@
         </div>
       </div>
 
-      <!-- Plain Text Workspace (hidden by default) -->
+      <!-- PLAIN TEXT WORKSPACE -->
       <div id="view-plain" class="workspace-view is-hidden">
         <div class="plain-text-header">
           <div class="plain-text-title-group">
@@ -209,22 +209,22 @@
           <pre id="plainTextOutput" class="plain-text-box"><code id="clickup-text-payload">No analysis executed yet. Run Analyze Security to generate report.</code></pre>
         </div>
       </div>
+    </div>
 
-      <!-- Hidden compatibility containers -->
-      <div id="viewCheatsheet" class="is-hidden" style="display:none;">
-        <button id="tabBtnCheatsheet" type="button"></button>
-        <button id="tabBtnAnalyzer" type="button"></button>
-        <div id="tabLabelAnalyzer"></div>
-        <div id="tabLabelCheatsheet"></div>
-        <div id="cheatsheetTitle"></div>
-        <div id="cheatsheetDesc"></div>
-        <div id="cheatsheetGroups"></div>
+    <!-- ========================================== -->
+    <!-- VIEW: CHEAT SHEET                          -->
+    <!-- ========================================== -->
+    <div id="viewCheatsheet" class="view-container is-hidden" style="overflow-y: auto;">
+      <div class="cheatsheet-header">
+        <h2 id="cheatsheetTitle" class="cheatsheet-main-title">Standard Diagnostic & Status Commands</h2>
+        <p id="cheatsheetDesc" class="cheatsheet-desc-text">Standardized diagnostic and status command blocks for FortiGate Firewalls and FortiAnalyzer appliances. Click <strong>Copy Verified 1-Click Bundle</strong> to paste into your terminal, or click individual commands.</p>
       </div>
-      <div id="resultsHeading" style="display:none;"></div>
-      <div id="viewAnalyzer" style="display:none;"></div>
-    </main>
-
-    <!-- 5. TOAST NOTIFICATION (Micro-pill) -->
+      <div id="cheatsheetGroups"></div>
+    </div>
+    
+    <div id="resultsHeading" style="display:none;"></div>
+    
+    <!-- 5. TOAST NOTIFICATION -->
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   </div>

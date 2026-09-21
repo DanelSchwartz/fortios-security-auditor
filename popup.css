@@ -1217,3 +1217,204 @@ html, body {
   opacity: 1;
   transform: translateX(-50%) translateY(-2px);
 }
+/* =====================================================================
+   6. FIXES & CHEAT SHEET VIEW STYLES
+   ===================================================================== */
+
+/* Prevent truncation in Action Bar Summary by shrinking gap & font */
+.summary-indicator {
+  font-size: 10.5px;
+}
+
+/* Fix "Copy Text Report" button text wrap and icon squash */
+.btn-copy-clickup {
+  white-space: nowrap;
+  height: 26px;
+  flex-shrink: 0;
+}
+
+/* Main Navigation Tabs */
+.main-tabs {
+  display: flex;
+  background: var(--bg-surface-low);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.main-tab-btn {
+  flex: 1;
+  padding: 10px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 150ms ease;
+  white-space: nowrap;
+}
+
+.main-tab-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-surface-container);
+}
+
+.main-tab-btn.is-active {
+  color: var(--primary);
+  border-bottom-color: var(--primary);
+  background: var(--bg-surface);
+  font-weight: 600;
+}
+
+.view-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  background: var(--bg-canvas-lowest);
+}
+
+/* Cheat Sheet Specific Styles */
+.cheatsheet-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-surface-low);
+}
+
+.cheatsheet-main-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 8px 0;
+  font-family: var(--font-sans);
+}
+
+.cheatsheet-desc-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.cheatsheet-group {
+  margin: 24px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.cheatsheet-group-header {
+  padding: 12px 16px;
+  background: var(--bg-surface-container);
+  border-bottom: 1px solid var(--border-default);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.cheatsheet-group-title {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cheatsheet-group-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--primary);
+}
+
+.btn-bundle-copy {
+  background: var(--primary-container);
+  color: var(--on-primary-container);
+  border: 1px solid var(--primary-container-hover);
+  padding: 0 12px;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 150ms ease;
+  white-space: nowrap; /* מונע שבירת שורות של הטקסט */
+  height: 26px; /* גובה קשיח שמותאם לשאר הכפתורים */
+}
+
+.btn-bundle-copy:hover {
+  background: var(--primary-container-hover);
+}
+
+.btn-bundle-copy .btn-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
+
+.cheatsheet-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.cheatsheet-item {
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border-default);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background 150ms ease;
+}
+
+.cheatsheet-item:hover {
+  background: var(--bg-surface-container-high);
+}
+
+.cheatsheet-item:last-child {
+  border-bottom: none;
+}
+
+.cheatsheet-cmd {
+  font-family: var(--font-mono);
+  color: var(--accent-blue);
+  font-weight: 600;
+  font-size: 11.5px;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.cheatsheet-desc {
+  font-family: var(--font-sans);
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.cheatsheet-copy-hint {
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 150ms;
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  font-weight: 600;
+  padding-left: 12px;
+}
+
+.cheatsheet-item:hover .cheatsheet-copy-hint {
+  opacity: 1;
+  color: var(--text-primary);
+}
