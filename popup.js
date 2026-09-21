@@ -545,6 +545,16 @@ function hasCommand(text, commandFragment) {
   return new RegExp(escaped, "i").test(text);
 }
 
+function extractCommandOutput(text, commandPattern) {
+  if (!text) return "";
+  const cmdStr = typeof commandPattern === "string" 
+    ? commandPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    : commandPattern.source;
+  const cmdRegex = new RegExp(`(?:^|[#$]|\\n)\\s*${cmdStr}[^\\r\\n]*\\r?\\n([\\s\\S]*?)(?=(?:\\r?\\n[A-Za-z0-9_.-]+(?:\\s*\\([^)]+\\))?\\s*[#$]|\\n\\s*--More--|$))`, "i");
+  const match = cmdRegex.exec(text);
+  return match && match[1] ? match[1].trim() : "";
+}
+
 function isFazOutput(text) {
   return (
     /Platform Full Name\s*:\s*FortiAnalyzer/i.test(text) ||
@@ -2048,46 +2058,51 @@ function checkFgtThreatFeeds(text, tokenizer = null) {
   }
 
   if (!feeds.length && text) {
-    const headerRe = /==\s*\[\s*(.+?)\s*\]([\s\S]*?)(?=(?:==\s*\[)|(?:#\s*[a-z])|(?:\n\s*\n\s*[A-Z])|$)/gi;
-    let hm;
-    while ((hm = headerRe.exec(text)) !== null) {
-      const feedName = cleanFeedIdentifier(hm[1]);
-      if (feedName) {
-        feeds.push({
-          name: feedName,
-          body: hm[2].trim(),
-        });
-      }
-    }
+    const isLiveCmd = hasCommand(text, "get system external-resource");
+    const targetCliText = isLiveCmd ? extractCommandOutput(text, "get system external-resource") : (hasExtResSection ? "" : text);
 
-    if (!feeds.length) {
-      const nameRe = /(?:^|\s|,|;)(?:name|feed|external[\s_-]*resource|resource)\s*[:=\s]\s*["']?(\b(?:FGT-[A-Za-z0-9_-]+|[A-Z0-9]+(?:-[A-Z0-9]+)*)\b)/gim;
-      const nameMatches = [...text.matchAll(nameRe)];
-      for (let i = 0; i < nameMatches.length; i++) {
-        const feedName = cleanFeedIdentifier(nameMatches[i][1]);
-        if (feedName && !/^(?:enable|disable|true|false|status|get|system|type|category)$/i.test(feedName)) {
-          const start = nameMatches[i].index;
-          const end = i + 1 < nameMatches.length ? nameMatches[i + 1].index : text.length;
+    if (targetCliText) {
+      const headerRe = /==\s*\[\s*(.+?)\s*\]([\s\S]*?)(?=(?:==\s*\[)|(?:#\s*[a-z])|(?:\n\s*\n\s*[A-Z])|$)/gi;
+      let hm;
+      while ((hm = headerRe.exec(targetCliText)) !== null) {
+        const feedName = cleanFeedIdentifier(hm[1]);
+        if (feedName && !/^(?:onboard|disk\d*|port\d+|mgmt\d*|vlan\d*|wan\d*|internal\d*|loopback\d*|ssl\.\w+|dmz\d*|ha|sync)$/i.test(feedName)) {
           feeds.push({
             name: feedName,
-            body: text.slice(start, end).trim(),
+            body: hm[2].trim(),
           });
         }
       }
-    }
 
-    if (!feeds.length) {
-      const standaloneMatches = [...text.matchAll(/\b(FGT-FEED-[A-Za-z0-9_-]+)\b/gi)];
-      for (const sm of standaloneMatches) {
-        const feedName = cleanFeedIdentifier(sm[1]);
-        if (feedName && !feeds.some(f => f.name === feedName)) {
-          feeds.push({
-            name: feedName,
-            body: text,
-            status: "enable",
-            isDisabled: false,
-            hasError: false
-          });
+      if (!feeds.length) {
+        const nameRe = /(?:^|\s|,|;)(?:name|feed|external[\s_-]*resource|resource)\s*[:=\s]\s*["']?(\b(?:FGT-[A-Za-z0-9_-]+|[A-Z0-9]+(?:-[A-Z0-9]+)*)\b)/gim;
+        const nameMatches = [...targetCliText.matchAll(nameRe)];
+        for (let i = 0; i < nameMatches.length; i++) {
+          const feedName = cleanFeedIdentifier(nameMatches[i][1]);
+          if (feedName && !/^(?:enable|disable|true|false|status|get|system|type|category|onboard|port\d+|disk\d*)$/i.test(feedName)) {
+            const start = nameMatches[i].index;
+            const end = i + 1 < nameMatches.length ? nameMatches[i + 1].index : targetCliText.length;
+            feeds.push({
+              name: feedName,
+              body: targetCliText.slice(start, end).trim(),
+            });
+          }
+        }
+      }
+
+      if (!feeds.length) {
+        const standaloneMatches = [...targetCliText.matchAll(/\b(FGT-FEED-[A-Za-z0-9_-]+)\b/gi)];
+        for (const sm of standaloneMatches) {
+          const feedName = cleanFeedIdentifier(sm[1]);
+          if (feedName && !feeds.some(f => f.name === feedName)) {
+            feeds.push({
+              name: feedName,
+              body: targetCliText,
+              status: "enable",
+              isDisabled: false,
+              hasError: false
+            });
+          }
         }
       }
     }
@@ -5957,9 +5972,9 @@ function checkCisAdmAdminPorts(tokenizer, text) {
  */
 function checkCisSysHostname(tokenizer, text) {
   let hostname = tokenizer ? cleanVal(tokenizer.getSystemGlobalProperty("hostname") || tokenizer.getProperty("system global", "hostname")) : null;
-  if (!hostname) {
-    const m = /(?:set\s+)?hostname\s+(?:"([^"]+)"|(\S+))/i.exec(text);
-    if (m) hostname = m[1] || m[2];
+  if (!hostname && text) {
+    const m = /(?:set\s+)?hostname\s*(?::\s*|\s+)"?([^"\r\n\s]+)/i.exec(text);
+    if (m) hostname = m[1];
   }
 
   const hasGlobal = tokenizer ? (!!tokenizer.getSystemSection("system global") || !!tokenizer.getSection("system global")) : /config system global/i.test(text);
@@ -7287,8 +7302,8 @@ function extractDeviceMetadata(findings = [], kind = "conf", text = "") {
   // 1. Try findingText from findings (e.g. FGT-SYS-01 or CIS-SYS-01)
   for (const f of findings) {
     if (f.id === "FGT-SYS-01" || f.id === "CIS-SYS-01") {
-      const hMatch = /Hostname:\s*([^\s,|]+)/i.exec(f.findingText);
-      if (hMatch && !hostname) hostname = normalizeApplianceName(hMatch[1], "");
+      const hMatch = /(?:Hostname:\s*|hostname configured:\s*["']?|hostname detected:\s*["']?)([^\s,|"']+)/i.exec(f.findingText);
+      if (hMatch && !hostname && hMatch[1] !== ":") hostname = normalizeApplianceName(hMatch[1], "");
       const vMatch = /(?:Version|Firmware):\s*([^\n,|]+)/i.exec(f.findingText);
       if (vMatch && !firmware) firmware = vMatch[1].trim();
       const sMatch = /Serial(?:-Number)?:\s*([A-Z0-9]+)/i.exec(f.findingText);
@@ -8734,15 +8749,139 @@ const DOM = {
   plainTextOutput: document.getElementById("plainTextOutput"),
   summaryCountText: document.getElementById("summaryCountText"),
   browseBtn: document.getElementById("browseBtn"),
+  verifiedText: document.getElementById("verifiedText"),
 };
 
 let currentFindings = [];
 let loadedFiles = []; // Array of { id, name, size, type, content }
 let currentLang = "en";
+let issuesOnly = false;
 try {
   const savedLang = localStorage.getItem("secops_lang");
   if (savedLang === "en") currentLang = savedLang;
 } catch (e) {}
+try {
+  issuesOnly = localStorage.getItem("secops_issues_only") === "true";
+} catch (e) {}
+
+function showToast(m) {
+  if (!DOM.toast) return;
+  DOM.toast.textContent = m;
+  DOM.toast.classList.add("show");
+  setTimeout(() => DOM.toast.classList.remove("show"), 2200);
+}
+
+function updateTimestamp() {
+  if (DOM.timestampBadge) {
+    DOM.timestampBadge.textContent = new Date().toLocaleTimeString([], { hour12: false });
+  }
+}
+
+function updateDetectBadge(kind) {
+  if (!DOM.detectBadge) return;
+  const s = UI_STRINGS[currentLang] || UI_STRINGS.en;
+  DOM.detectBadge.textContent = (s.detectBadge && (s.detectBadge[kind] || s.detectBadge.none)) || kind;
+  DOM.detectBadge.dataset.kind = kind;
+}
+
+function updateCharCounter() {
+  if (DOM.charCounter && DOM.cliInput) {
+    DOM.charCounter.textContent = `${(DOM.cliInput.value || "").length.toLocaleString()} chars`;
+  }
+}
+
+function updateSummaryIndicator(files, checks) {
+  if (DOM.summaryCountText) {
+    DOM.summaryCountText.textContent = `${files} file${files === 1 ? "" : "s"} parsed · ${checks} checks evaluated`;
+  }
+}
+
+async function computeSha256(str) {
+  if (!str) return "";
+  try {
+    if (typeof crypto !== "undefined" && crypto.subtle && typeof TextEncoder !== "undefined") {
+      const enc = new TextEncoder();
+      const hashBuffer = await crypto.subtle.digest("SHA-256", enc.encode(str));
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+  } catch (err) {
+    console.warn("SHA-256 calculation error:", err);
+  }
+  return "";
+}
+
+async function updateVerifiedHash(content) {
+  if (!DOM.verifiedText) return;
+  if (!content || !content.trim()) {
+    DOM.verifiedText.textContent = "Local Client-Side Only";
+    DOM.verifiedText.title = "All configuration and CLI telemetry is parsed strictly within your local browser sandbox. Zero data exfiltration.";
+    return;
+  }
+  const hash = await computeSha256(content);
+  if (hash) {
+    DOM.verifiedText.textContent = `SHA-256: ${hash.slice(0, 8)}...`;
+    DOM.verifiedText.title = `SHA-256 Checksum: ${hash} (Local Browser Validation)`;
+  } else {
+    DOM.verifiedText.textContent = "Verified Local Parse";
+    DOM.verifiedText.title = "Parsed locally in client sandbox.";
+  }
+}
+
+function checkIssuesExportAllowed() {
+  const isOnly = DOM.filterIssuesOnly ? DOM.filterIssuesOnly.checked : false;
+  const profileFindings = currentFindings;
+  if (isOnly) {
+    const issues = profileFindings.filter((f) => f.status === "FAIL" || f.status === "WARN");
+    if (issues.length === 0) {
+      showToast(UI_STRINGS[currentLang].toastNoIssues || ("All checks passed! No issues to copy."));
+      return false;
+    }
+  }
+  return true;
+}
+
+function getExportPayload() {
+  const profileFindings = currentFindings;
+
+  const cisPassed = currentFindings.filter((f) => CIS_BENCHMARK_CONTROL_IDS.includes(f.id) && f.status === "PASS").length;
+  const totalPassed = cisPassed;
+  const totalEvaluated = CIS_BENCHMARK_TOTAL_CONTROLS;
+  const cisScore = Math.round((cisPassed / CIS_BENCHMARK_TOTAL_CONTROLS) * 100);
+
+  const isOnly = DOM.filterIssuesOnly ? DOM.filterIssuesOnly.checked : false;
+  let rawText = DOM.cliInput ? DOM.cliInput.value || "" : "";
+  if (!rawText.trim() && loadedFiles.length > 0) {
+    rawText = loadedFiles.map((f) => f.content).join("\n\n");
+  }
+  const kind = detectInputKind(rawText);
+  const opts = {
+    lang: currentLang,
+    issuesOnly: isOnly,
+    profile: "full",
+    cisScore,
+    totalPassed,
+    totalEvaluated,
+    rawText,
+  };
+
+  return { findings: profileFindings, kind, opts };
+}
+
+function switchWorkspaceView(view) {
+  const isHtml = view === "html";
+  DOM.viewHtml.classList.toggle("is-hidden", !isHtml);
+  DOM.viewPlain.classList.toggle("is-hidden", isHtml);
+  DOM.tabBtnHtml.classList.toggle("is-active", isHtml);
+  DOM.tabBtnPlain.classList.toggle("is-active", !isHtml);
+  DOM.tabBtnHtml.setAttribute("aria-selected", String(isHtml));
+  DOM.tabBtnPlain.setAttribute("aria-selected", String(!isHtml));
+
+  if (!isHtml && DOM.plainTextOutput && currentFindings.length > 0) {
+    const { findings, kind, opts } = getExportPayload();
+    DOM.plainTextOutput.textContent = generateCleanPlainText(findings, kind, opts);
+  }
+}
 
 function updateSummaryCounters(findings) {
   const profileFindings = findings;
@@ -9104,6 +9243,7 @@ function syncAggregatedInput() {
   DOM.cliInput.value = aggregated;
   updateCharCounter();
   updateDetectBadge(detectInputKind(aggregated));
+  updateVerifiedHash(aggregated);
 }
 
 async function handleFiles(fileList) {
@@ -9326,6 +9466,10 @@ function initEvents() {
       } catch (err) {}
       renderFindings(currentFindings);
       updateSummaryCounters(currentFindings);
+      if (DOM.plainTextOutput && currentFindings.length > 0) {
+        const { findings, kind, opts } = getExportPayload();
+        DOM.plainTextOutput.textContent = generateCleanPlainText(findings, kind, opts);
+      }
     });
   }
 
@@ -9390,6 +9534,7 @@ function initEvents() {
   DOM.cliInput.addEventListener("input", () => {
     updateCharCounter();
     updateDetectBadge(detectInputKind(DOM.cliInput.value || ""));
+    updateVerifiedHash(DOM.cliInput.value || "");
   });
 
   // Analyze Button (Runs Deduplication Engine across all aggregated content)
@@ -9420,10 +9565,12 @@ function initEvents() {
     const hasFindings = currentFindings.length > 0;
     setExportButtonsEnabled(hasFindings);
 
-    if (DOM.plainTextOutput && DOM.viewPlain && !DOM.viewPlain.classList.contains("is-hidden")) {
+    if (DOM.plainTextOutput) {
       const { findings, opts } = getExportPayload();
       DOM.plainTextOutput.textContent = generateCleanPlainText(findings, kind, opts);
     }
+
+    updateVerifiedHash(aggregatedText);
 
     const issuesCount = currentFindings.filter((f) => f.status === "FAIL" || f.status === "WARN").length;
     if (issuesCount > 0) {
@@ -9444,6 +9591,7 @@ function initEvents() {
     setExportButtonsEnabled(false);
     updateDetectBadge("none");
     updateSummaryIndicator(0, 0);
+    updateVerifiedHash("");
     if (DOM.plainTextOutput) {
       DOM.plainTextOutput.textContent = "No analysis executed yet. Run Analyze to generate report.";
     }
@@ -9451,48 +9599,6 @@ function initEvents() {
     if (deltaBanner) deltaBanner.style.display = "none";
     showToast("Dashboard reset");
   });
-
-  // Helper: check if issuesOnly filter allows export
-  function checkIssuesExportAllowed() {
-    const isOnly = DOM.filterIssuesOnly ? DOM.filterIssuesOnly.checked : false;
-    const profileFindings = currentFindings;
-    if (isOnly) {
-      const issues = profileFindings.filter((f) => f.status === "FAIL" || f.status === "WARN");
-      if (issues.length === 0) {
-        showToast(UI_STRINGS[currentLang].toastNoIssues || ("All checks passed! No issues to copy."));
-        return false;
-      }
-    }
-    return true;
-  }
-
-  // Helper: compute export payload honoring profile and CIS score
-  function getExportPayload() {
-    const profileFindings = currentFindings;
-
-    const cisPassed = currentFindings.filter((f) => CIS_BENCHMARK_CONTROL_IDS.includes(f.id) && f.status === "PASS").length;
-    const totalPassed = cisPassed;
-    const totalEvaluated = CIS_BENCHMARK_TOTAL_CONTROLS;
-    const cisScore = Math.round((cisPassed / CIS_BENCHMARK_TOTAL_CONTROLS) * 100);
-
-    const isOnly = DOM.filterIssuesOnly ? DOM.filterIssuesOnly.checked : false;
-    let rawText = DOM.cliInput ? DOM.cliInput.value || "" : "";
-    if (!rawText.trim() && loadedFiles.length > 0) {
-      rawText = loadedFiles.map((f) => f.content).join("\n\n");
-    }
-    const kind = detectInputKind(rawText);
-    const opts = {
-      lang: currentLang,
-      issuesOnly: isOnly,
-      profile: "full",
-      cisScore,
-      totalPassed,
-      totalEvaluated,
-      rawText,
-    };
-
-    return { findings: profileFindings, kind, opts };
-  }
 
   // 1. Copy for ClickUp (Rich Text with fallback plain text)
   DOM.copyRichTextBtn.addEventListener("click", async () => {

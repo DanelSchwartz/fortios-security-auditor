@@ -92,6 +92,21 @@ html, body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Tailwind utility aliases from Stitch mockup */
+.dark {
+  color-scheme: dark;
+}
+.bg-surface {
+  background-color: var(--bg-surface);
+}
+.text-on-surface {
+  color: var(--text-primary);
+}
+.antialiased {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
 ::selection {
   background: rgba(123, 219, 128, 0.25);
   color: #ffffff;
@@ -386,6 +401,30 @@ html, body {
   width: 13px;
   height: 13px;
   color: var(--primary);
+}
+
+.prompt-text {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.verified-text {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.chip-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+}
+
+.chip-count {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
 }
 
 /* Terminal Direct Paste Drawer (Collapsible) */
