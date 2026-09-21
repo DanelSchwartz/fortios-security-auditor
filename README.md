@@ -15,6 +15,7 @@ Built for SecOps engineers and MSSPs who require a high-density, utility-focused
   - **CIS Benchmarks (FortiOS 7.x)**: Admin idle timeout, account lockout, non-standard admin ports, NTP synchronization, global password policy complexity, legacy SNMPv1/v2c removal, centralized logging, and factory default certificate replacement.
   - **Threat-Informed Defense & CVE Mitigations**: Detection logic for critical attack vectors including SSL-VPN Web Mode exposure (CVE-2023-27997, CVE-2024-21762), FGFM protocol perimeter exposure (CVE-2024-23113, CVE-2024-47575), and firmware lifecycle patch tracking.
   - **Operational & Network Diagnostics**: WAD proxy memory leak/freeze detection, HA split-brain and failover flapping forensics, FortiGuard Anycast rating latency, BGP route churn, FortiAnalyzer storage RAID health, and silent log forwarder detection.
+- **Built-in Diagnostic Cheat Sheet**: Includes a verified 1-click command bundle tab to instantly extract the exact telemetry needed for full operational health checks without manually typing syntax.
 - **Privacy & Compliance**: 
   - 100% client-side execution.
   - Zero external trackers, analytics, or remote CDN script loads (fully CSP compliant with Manifest V3).
@@ -34,13 +35,17 @@ Built for SecOps engineers and MSSPs who require a high-density, utility-focused
 
 ---
 
-## Usage
+## Usage Workflow
 
-1. Click the extension icon in your Chrome toolbar to open the compact utility interface.
-2. Drag and drop FortiOS configuration backups (`.conf`, `.cfg`) or live CLI diagnostic logs (`.txt`, `.log`), or use the collapsible **Direct Paste / Terminal Session** drawer.
-3. Click **Analyze Security** to execute the complete multi-engine audit suite.
-4. Review findings categorized by severity (`CRITICAL`, `WARNING`, `PASS`, `INFO`) with exact target configuration paths and 1-click copyable remediation CLI commands.
-5. Export reports as standalone HTML or clean ASCII plain text for documentation and ticketing.
+For a comprehensive audit, it is highly recommended to provide **both** the static configuration and the live CLI telemetry.
+
+1. **Get the Commands:** Open the extension and switch to the **Diagnostic CLI Cheat Sheet** tab. Click **Copy Verified 1-Click Bundle** for either FortiGate or FortiAnalyzer.
+2. **Run & Save:** Paste the commands into your appliance's CLI via SSH/Console and save the complete terminal output to a `.txt` or `.log` file.
+3. **Backup Config:** Download a full configuration backup (`.conf` or `.cfg`) directly from the appliance GUI.
+4. **Analyze:** Switch back to the **Security Audit & Inspector** tab in the extension. Drag and drop **both** the configuration file and the CLI log file into the dropzone.
+5. Click **Analyze Security** to execute the complete multi-engine audit suite.
+6. Review findings categorized by severity (`CRITICAL`, `WARNING`, `PASS`, `INFO`) with exact target configuration paths and 1-click copyable remediation CLI commands.
+7. Export reports as standalone HTML or clean ASCII plain text for documentation and ticketing.
 
 ---
 
