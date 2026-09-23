@@ -520,20 +520,20 @@ html, body {
 .action-bar-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   flex: 1;
   min-width: 0;
 }
 
 .btn-analyze {
   height: 28px;
-  padding: 0 12px;
+  padding: 0 10px;
   background: var(--primary-container);
   color: var(--on-primary-container);
   border: 1px solid #2ea043;
   border-radius: var(--radius-xs);
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 600;
   display: flex;
   align-items: center;
@@ -541,6 +541,7 @@ html, body {
   cursor: pointer;
   transition: background-color 100ms ease;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .btn-analyze:hover {
@@ -558,7 +559,7 @@ html, body {
 
 .btn-clear {
   height: 28px;
-  padding: 0 8px;
+  padding: 0 6px;
   background: var(--bg-surface-container);
   color: var(--text-secondary);
   border: 1px solid var(--border-muted);
@@ -567,6 +568,8 @@ html, body {
   font-size: 11px;
   cursor: pointer;
   transition: background-color 100ms ease, color 100ms ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .btn-clear:hover {
@@ -577,13 +580,15 @@ html, body {
 .summary-indicator {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 .status-dot {
@@ -1152,7 +1157,7 @@ html, body {
 }
 
 .btn-copy-clickup {
-  height: 24px;
+  height: 26px;
   padding: 0 8px;
   background: var(--primary-container);
   color: var(--on-primary-container);
@@ -1165,11 +1170,44 @@ html, body {
   align-items: center;
   gap: 4px;
   cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
   transition: background-color 100ms ease;
 }
 
 .btn-copy-clickup:hover {
   background: var(--primary-container-hover);
+}
+
+.btn-bundle-copy {
+  height: 26px;
+  padding: 0 8px;
+  background: var(--bg-surface-container-high);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 500;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background-color 100ms ease, border-color 100ms ease;
+}
+
+.btn-bundle-copy:hover {
+  background: var(--bg-surface-container-highest);
+  border-color: var(--border-subtle);
+}
+
+.btn-bundle-copy svg,
+.btn-bundle-copy .btn-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
 }
 
 .plain-text-container {
@@ -1217,23 +1255,11 @@ html, body {
   opacity: 1;
   transform: translateX(-50%) translateY(-2px);
 }
+
 /* =====================================================================
-   6. FIXES & CHEAT SHEET VIEW STYLES
+   6. MAIN NAVIGATION TABS & CHEAT SHEET VIEW
    ===================================================================== */
 
-/* Prevent truncation in Action Bar Summary by shrinking gap & font */
-.summary-indicator {
-  font-size: 10.5px;
-}
-
-/* Fix "Copy Text Report" button text wrap and icon squash */
-.btn-copy-clickup {
-  white-space: nowrap;
-  height: 26px;
-  flex-shrink: 0;
-}
-
-/* Main Navigation Tabs */
 .main-tabs {
   display: flex;
   background: var(--bg-surface-low);
@@ -1242,7 +1268,7 @@ html, body {
 
 .main-tab-btn {
   flex: 1;
-  padding: 10px;
+  padding: 9px 12px;
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
@@ -1250,7 +1276,7 @@ html, body {
   font-family: var(--font-mono);
   font-size: 11px;
   cursor: pointer;
-  transition: all 150ms ease;
+  transition: all 120ms ease;
   white-space: nowrap;
 }
 
@@ -1274,38 +1300,37 @@ html, body {
   background: var(--bg-canvas-lowest);
 }
 
-/* Cheat Sheet Specific Styles */
 .cheatsheet-header {
-  padding: 20px 24px;
+  padding: 16px 20px;
   border-bottom: 1px solid var(--border-default);
   background: var(--bg-surface-low);
 }
 
 .cheatsheet-main-title {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
   color: var(--text-primary);
-  margin: 0 0 8px 0;
+  margin: 0 0 6px 0;
   font-family: var(--font-sans);
 }
 
 .cheatsheet-desc-text {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-secondary);
-  line-height: 1.5;
+  line-height: 1.45;
   margin: 0;
 }
 
 .cheatsheet-group {
-  margin: 24px;
+  margin: 16px 20px;
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
 .cheatsheet-group-header {
-  padding: 12px 16px;
+  padding: 10px 14px;
   background: var(--bg-surface-container);
   border-bottom: 1px solid var(--border-default);
   display: flex;
@@ -1316,7 +1341,7 @@ html, body {
 .cheatsheet-group-title {
   font-family: var(--font-mono);
   font-weight: 600;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--text-primary);
   display: flex;
   align-items: center;
@@ -1324,39 +1349,10 @@ html, body {
 }
 
 .cheatsheet-group-dot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--primary);
-}
-
-.btn-bundle-copy {
-  background: var(--primary-container);
-  color: var(--on-primary-container);
-  border: 1px solid var(--primary-container-hover);
-  padding: 0 12px;
-  border-radius: var(--radius-xs);
-  cursor: pointer;
-  font-family: var(--font-sans);
-  font-size: 11px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  transition: all 150ms ease;
-  white-space: nowrap; /* מונע שבירת שורות של הטקסט */
-  height: 26px; /* גובה קשיח שמותאם לשאר הכפתורים */
-}
-
-.btn-bundle-copy:hover {
-  background: var(--primary-container-hover);
-}
-
-.btn-bundle-copy .btn-icon {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
 }
 
 .cheatsheet-list {
@@ -1370,14 +1366,14 @@ html, body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  padding: 10px 14px;
   background: transparent;
   border: none;
   border-bottom: 1px solid var(--border-default);
   color: var(--text-primary);
   cursor: pointer;
   text-align: left;
-  transition: background 150ms ease;
+  transition: background 120ms ease;
 }
 
 .cheatsheet-item:hover {
@@ -1392,26 +1388,26 @@ html, body {
   font-family: var(--font-mono);
   color: var(--accent-blue);
   font-weight: 600;
-  font-size: 11.5px;
+  font-size: 11px;
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
 }
 
 .cheatsheet-desc {
   font-family: var(--font-sans);
   color: var(--text-secondary);
-  font-size: 11px;
+  font-size: 10.5px;
 }
 
 .cheatsheet-copy-hint {
-  font-size: 10px;
+  font-size: 9.5px;
   color: var(--text-muted);
   opacity: 0;
-  transition: opacity 150ms;
+  transition: opacity 120ms;
   font-family: var(--font-sans);
   text-transform: uppercase;
   font-weight: 600;
-  padding-left: 12px;
+  padding-left: 10px;
 }
 
 .cheatsheet-item:hover .cheatsheet-copy-hint {
