@@ -181,13 +181,13 @@ function extractDeviceIdentity(text, defaultName = "Primary-FW") {
 }
 
 const DIAGNOSTIC_COMMANDS = {
-  "CIS-MED-01": "show system global | grep banner",
+  "CIS-MED-01": "show system global | grep -i banner",
   "CIS-HIGH-01": "show system auto-install",
-  "SEC-HIGH-02": "show system settings | grep src-check",
+  "SEC-HIGH-02": "show system settings | grep -i src-check",
   "CIS-MED-02": "show system dns",
   "SEC-HIGH-01": "show system admin",
   "SEC-MED-01": "show firewall ssl-ssh-profile",
-  "SEC-CRIT-01": "show system interface | grep -f fgfm",
+  "SEC-CRIT-01": "show system interface | grep -i fgfm",
   "SEC-CRIT-02": "show vpn ssl web portal",
   "SEC-CRIT-03": "get system status",
   "SEC-LIFE-01": "get system status",
@@ -239,7 +239,7 @@ const DIAGNOSTIC_COMMANDS = {
   "CIS-MGMT-01": "show system snmp community",
   "CIS-LOG-01": "show log fortianalyzer setting",
   "CIS-AUTH-02": "show system admin",
-  "CIS-TLS-01": "get system global",
+  "CIS-TLS-01": "get system global | grep -i strong-crypto",
   "CIS-CERT-01": "get vpn certificate local details"
 };
 
@@ -2172,7 +2172,7 @@ function checkFgtThreatFeeds(text, tokenizer = null) {
 
 /**
  * SEC-INTF-01: Administrative Access on WAN
- * Supported in both Static Config and Live CLI (show system interface | grep -f allowaccess).
+ * Supported in both Static Config and Live CLI (show system interface | grep -i allowaccess).
  * Inspect interface blocks where set role wan or alias/name contains "wan"/"isp"/"internet".
  * FAIL: If set allowaccess includes https, ssh, http, or telnet.
  * Action: "Disable administrative access on external interface and document in client misconfiguration tracker."
@@ -3291,34 +3291,44 @@ function checkSecFgfmExposure(text, ast) {
 }
 
 function checkSecSslVpnWebMode(text, ast) {
-  if (!/(?:^|\n)\s*config\s+/i.test(text) && !/vpn\s+ssl/i.test(text)) return null;
-
-  let webModePortals = [];
   let foundAnyPortal = false;
-  const scopes = [ast && ast.global, ...(ast && ast.vdoms ? Object.values(ast.vdoms) : [])].filter(Boolean);
-  for (const s of scopes) {
-    const portals = (s.vpn && s.vpn.ssl && s.vpn.ssl.web && s.vpn.ssl.web.portal) ||
-                    (s.vpn && (s.vpn['ssl web portal'] || (s.vpn.ssl && s.vpn.ssl.web && s.vpn.ssl.web.portal))) ||
-                    s['vpn ssl web portal'] || {};
-    for (const [portalName, data] of Object.entries(portals)) {
-      foundAnyPortal = true;
-      const webMode = (data['web-mode'] || '').toLowerCase();
-      if (webMode !== 'disable') {
-        webModePortals.push(portalName);
+  const vulnerablePortals = [];
+
+  // 1. Try AST evaluation first (strictly within config vpn ssl web portal)
+  if (ast) {
+    const scopes = [ast.global, ...(ast.vdoms ? Object.values(ast.vdoms) : [])].filter(Boolean);
+    for (const s of scopes) {
+      const portals = (s.vpn && s.vpn.ssl && s.vpn.ssl.web && s.vpn.ssl.web.portal) ||
+                      (s.vpn && (s.vpn['ssl web portal'] || (s.vpn.ssl && s.vpn.ssl.web && s.vpn.ssl.web.portal))) ||
+                      s['vpn ssl web portal'] || null;
+      if (portals && typeof portals === 'object') {
+        for (const [portalName, data] of Object.entries(portals)) {
+          if (!data || typeof data !== 'object') continue;
+          foundAnyPortal = true;
+          const webMode = (data['web-mode'] || '').toLowerCase();
+          if (webMode === 'enable') {
+            vulnerablePortals.push(portalName);
+          }
+        }
       }
     }
   }
 
-  if (!foundAnyPortal) {
-    const portalBlocks = text.split(/(?:^|\n)\s*edit\s+/i);
-    for (let i = 1; i < portalBlocks.length; i++) {
-      const block = portalBlocks[i];
-      if (/set\s+tunnel-mode/i.test(block) || /set\s+web-mode/i.test(block)) {
+  // 2. Fallback or Raw Text Scoped Evaluation: Strictly within 'config vpn ssl web portal ... end'
+  if (!foundAnyPortal && text) {
+    const portalSectionRe = /config\s+vpn\s+ssl\s+web\s+portal\b([\s\S]*?)(?:\n\s*end\b|$)/gi;
+    let secMatch;
+    while ((secMatch = portalSectionRe.exec(text)) !== null) {
+      const secBody = secMatch[1];
+      const editBlocks = secBody.split(/(?:^|\n)\s*edit\s+/i);
+      for (let i = 1; i < editBlocks.length; i++) {
+        const block = editBlocks[i];
+        const nameMatch = block.match(/^["']?([a-zA-Z0-9_.-]+)["']?/);
+        const portalName = nameMatch ? nameMatch[1] : `portal_${i}`;
         foundAnyPortal = true;
-        const m = block.match(/^["']?([a-zA-Z0-9_-]+)["']?/);
-        const name = m ? m[1] : `portal_${i}`;
-        if (!/set\s+web-mode\s+disable/i.test(block)) {
-          webModePortals.push(name);
+        // Strictly check if web-mode enable is explicitly set in this edit block
+        if (/set\s+web-mode\s+enable\b/i.test(block)) {
+          vulnerablePortals.push(portalName);
         }
       }
     }
@@ -3326,14 +3336,16 @@ function checkSecSslVpnWebMode(text, ast) {
 
   if (!foundAnyPortal) return null;
 
-  const isHardened = webModePortals.length === 0;
+  const uniqueVulnerable = [...new Set(vulnerablePortals)];
+  const isHardened = uniqueVulnerable.length === 0;
+
   return makeFinding({
     id: "SEC-CRIT-02",
     component: "SSL-VPN Web Mode Perimeter Exposure",
     status: isHardened ? "PASS" : "FAIL",
     findingText: isHardened
       ? "SSL-VPN Web Mode is completely disabled. Gateway operates in Tunnel Mode only."
-      : `Critical Exposure: SSL-VPN Web Mode (HTML5 bookmarks / reverse proxy) enabled on portal(s): ${webModePortals.join(', ')}. Disabling web mode eliminates primary remote exploit vectors (CVE-2023-27997, CVE-2024-21762).`,
+      : `Critical Exposure: SSL-VPN Web Mode (HTML5 bookmarks / reverse proxy) enabled on portal(s): ${uniqueVulnerable.join(', ')}. Disabling web mode eliminates primary remote exploit vectors (CVE-2023-27997, CVE-2024-21762).`,
     actionText: "Disable web-mode on all SSL-VPN portals and enforce strictly tunnel-mode access.",
     remediationCli: `config vpn ssl web portal\n    edit <portal-name>\n        set web-mode disable\n    next\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-CRIT-02"],
@@ -4757,8 +4769,8 @@ const HIGH_RISK_VPN_COUNTRIES = {
 };
 
 const GENERAL_FOREIGN_VPN_COUNTRIES = {
-  US: "USA",
-  USA: "USA",
+  US: "United States",
+  USA: "United States",
   GB: "United Kingdom",
   GBR: "United Kingdom",
   UK: "United Kingdom",
@@ -4999,23 +5011,40 @@ const DOMESTIC_VPN_TOKENS = new Set([
   "branch", "site", "allowed", "vpn", "allowed-vpn", "allowed_vpn", "vpn-allowed", "vpn_allowed",
 ]);
 
-function getFirewallAddressMap(tokenizer, text) {
+const ISO_COUNTRY_NAMES = {
+  ...HIGH_RISK_VPN_COUNTRIES,
+  ...GENERAL_FOREIGN_VPN_COUNTRIES,
+  IL: "Israel",
+  ISR: "Israel",
+};
+
+function getIsoCountryName(code) {
+  if (!code) return "";
+  const upper = code.trim().toUpperCase();
+  return ISO_COUNTRY_NAMES[upper] || upper;
+}
+
+function getFirewallAddressMap(tokenizer, text, targetVdom = null) {
   const map = new Map();
-  const entries = tokenizer ? tokenizer.getEntries("firewall address") : {};
-  for (const [key, entry] of Object.entries(entries)) {
-    const origName = entry.name || entry._origKey || key;
-    const props = entry.properties || {};
-    const type = cleanVal(props["type"] || "ipmask").toLowerCase();
-    const country = cleanVal(props["country"] || "").toUpperCase();
-    const subnet = cleanVal(props["subnet"] || "");
-    const addrObj = { name: origName, type, country, subnet };
-    map.set(key.toLowerCase(), addrObj);
-    map.set(origName.toLowerCase(), addrObj);
+  if (tokenizer) {
+    const vdomEntries = targetVdom ? (tokenizer.getEntries("firewall address", targetVdom) || {}) : (tokenizer.getEntries("firewall address") || {});
+    const rootEntries = (targetVdom && targetVdom !== "root") ? (tokenizer.getEntries("firewall address", "root") || {}) : {};
+    const allEntries = { ...rootEntries, ...vdomEntries };
+    for (const [key, entry] of Object.entries(allEntries)) {
+      const origName = entry.name || entry._origKey || key;
+      const props = entry.properties || {};
+      const type = cleanVal(props["type"] || "ipmask").toLowerCase();
+      const country = cleanVal(props["country"] || "").toUpperCase();
+      const subnet = cleanVal(props["subnet"] || "");
+      const addrObj = { name: origName, type, country, subnet };
+      map.set(key.toLowerCase(), addrObj);
+      map.set(origName.toLowerCase(), addrObj);
+    }
   }
 
   if (!map.size && text) {
-    const secMatch = /(?:config|show)\s+firewall\s+address([\s\S]*?)(?:^end|\n\s*end)/im.exec(text);
-    if (secMatch) {
+    const secMatches = [...text.matchAll(/(?:config|show)\s+firewall\s+address([\s\S]*?)(?:^end|\n\s*end)/gim)];
+    for (const secMatch of secMatches) {
       const blockRe = /edit\s+(?:"([^"]+)"|(\S+))([\s\S]*?)next/gi;
       let m;
       while ((m = blockRe.exec(secMatch[1])) !== null) {
@@ -5036,21 +5065,25 @@ function getFirewallAddressMap(tokenizer, text) {
   return map;
 }
 
-function getFirewallAddrGroupMap(tokenizer, text) {
+function getFirewallAddrGroupMap(tokenizer, text, targetVdom = null) {
   const map = new Map();
-  const entries = tokenizer ? tokenizer.getEntries("firewall addrgrp") : {};
-  for (const [key, entry] of Object.entries(entries)) {
-    const origName = entry.name || entry._origKey || key;
-    const props = entry.properties || {};
-    const members = extractQuotedTokens(props["member"] || "");
-    const grpObj = { name: origName, members };
-    map.set(key.toLowerCase(), grpObj);
-    map.set(origName.toLowerCase(), grpObj);
+  if (tokenizer) {
+    const vdomEntries = targetVdom ? (tokenizer.getEntries("firewall addrgrp", targetVdom) || {}) : (tokenizer.getEntries("firewall addrgrp") || {});
+    const rootEntries = (targetVdom && targetVdom !== "root") ? (tokenizer.getEntries("firewall addrgrp", "root") || {}) : {};
+    const allEntries = { ...rootEntries, ...vdomEntries };
+    for (const [key, entry] of Object.entries(allEntries)) {
+      const origName = entry.name || entry._origKey || key;
+      const props = entry.properties || {};
+      const members = extractQuotedTokens(props["member"] || "");
+      const grpObj = { name: origName, members };
+      map.set(key.toLowerCase(), grpObj);
+      map.set(origName.toLowerCase(), grpObj);
+    }
   }
 
   if (!map.size && text) {
-    const secMatch = /(?:config|show)\s+firewall\s+addrgrp([\s\S]*?)(?:^end|\n\s*end)/im.exec(text);
-    if (secMatch) {
+    const secMatches = [...text.matchAll(/(?:config|show)\s+firewall\s+addrgrp([\s\S]*?)(?:^end|\n\s*end)/gim)];
+    for (const secMatch of secMatches) {
       const blockRe = /edit\s+(?:"([^"]+)"|(\S+))([\s\S]*?)next/gi;
       let m;
       while ((m = blockRe.exec(secMatch[1])) !== null) {
@@ -5067,8 +5100,60 @@ function getFirewallAddrGroupMap(tokenizer, text) {
   return map;
 }
 
+function resolveAddrGroupMembersRecursive(token, grpMap, visited = new Set()) {
+  const lower = token.toLowerCase();
+  if (visited.has(lower)) {
+    return [];
+  }
+  visited.add(lower);
+
+  let grp = grpMap ? (grpMap.get(lower) || grpMap.get(`root::${lower}`)) : null;
+  if (!grp && grpMap) {
+    for (const [k, v] of grpMap.entries()) {
+      if (k === lower || k.endsWith(`::${lower}`)) {
+        grp = v;
+        break;
+      }
+    }
+  }
+
+  if (grp && grp.members && grp.members.length > 0) {
+    const leafTokens = [];
+    for (const member of grp.members) {
+      const resolved = resolveAddrGroupMembersRecursive(member, grpMap, new Set(visited));
+      if (resolved.length > 0) {
+        leafTokens.push(...resolved);
+      } else {
+        leafTokens.push(member);
+      }
+    }
+    return leafTokens;
+  }
+
+  return [];
+}
+
 function classifyVpnSourceEntity(token, addrMap) {
   const lower = token.toLowerCase();
+  const tokenUpper = token.toUpperCase();
+
+  // 0. Default wildcard check
+  if (lower === "all" || lower === "all_ipv4" || lower === "0.0.0.0/0") {
+    return {
+      token,
+      isWildcard: true,
+      isDomestic: false,
+      isForeign: false,
+      isStaticIp: false,
+      countryName: "All (Global)",
+      isoCode: "",
+      riskLevel: "critical",
+      isHeuristic: false,
+      isGeoObject: false,
+      geoDisplay: "",
+    };
+  }
+
   let addrObj = addrMap ? addrMap.get(lower) : null;
   if (!addrObj && addrMap) {
     addrObj = addrMap.get(`root::${lower}`);
@@ -5082,97 +5167,306 @@ function classifyVpnSourceEntity(token, addrMap) {
     }
   }
 
-  // 1. Check if defined in firewall address with native geography type
+  // 1. Defined in firewall address with native geography type or country property
   if (addrObj && (addrObj.type === "geography" || addrObj.country)) {
     const cc = (addrObj.country || "").toUpperCase();
     if (cc === "IL" || cc === "ISR") {
-      return { isDomestic: true, isForeign: false, isStaticIp: false, countryName: "Israel", riskLevel: "domestic", token, isHeuristic: false };
+      return {
+        token,
+        isWildcard: false,
+        isDomestic: true,
+        isForeign: false,
+        isStaticIp: false,
+        countryName: "Israel",
+        isoCode: "IL",
+        riskLevel: "domestic",
+        isHeuristic: false,
+        isGeoObject: true,
+        geoDisplay: `${addrObj.name} (IL)`,
+      };
     }
-    if (CONFIGURABLE_HIGH_RISK_COUNTRIES[cc]) {
-      return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: CONFIGURABLE_HIGH_RISK_COUNTRIES[cc], riskLevel: "high", token, isHeuristic: false };
-    }
-    if (GENERAL_FOREIGN_VPN_COUNTRIES[cc]) {
-      return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: GENERAL_FOREIGN_VPN_COUNTRIES[cc], riskLevel: "general", token, isHeuristic: false };
-    }
-    return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: `Foreign (${cc})`, riskLevel: "general", token, isHeuristic: false };
+    const countryName = getIsoCountryName(cc);
+    const isHigh = !!HIGH_RISK_VPN_COUNTRIES[cc];
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: false,
+      isForeign: true,
+      isStaticIp: false,
+      countryName,
+      isoCode: cc,
+      riskLevel: isHigh ? "high" : "general",
+      isHeuristic: false,
+      isGeoObject: true,
+      geoDisplay: `${addrObj.name} (${cc})`,
+    };
   }
 
-  // 2. Check if token represents a static IP or host object
+  // 2. Subnet / IP range / host in addrMap
+  if (addrObj && addrObj.type !== "geography" && addrObj.subnet) {
+    const subnetIpMatch = /(\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,2})?)/.exec(addrObj.subnet);
+    let ipDisp = subnetIpMatch ? subnetIpMatch[1] : (addrObj.subnet || token);
+    const maskMatch = /\s+(\d{1,3}(?:\.\d{1,3}){3})/.exec(addrObj.subnet);
+    if (maskMatch && !ipDisp.includes("/")) {
+      const mask = maskMatch[1];
+      if (mask === "255.255.255.255") {
+        // single host
+      } else if (mask === "255.255.255.0") {
+        ipDisp += "/24";
+      } else if (mask === "255.255.0.0") {
+        ipDisp += "/16";
+      } else if (mask === "255.0.0.0") {
+        ipDisp += "/8";
+      }
+    }
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: false,
+      isForeign: false,
+      isStaticIp: true,
+      ipDisplay: ipDisp,
+      riskLevel: "static_ip",
+      isHeuristic: false,
+      isGeoObject: false,
+      geoDisplay: "",
+    };
+  }
+
+  // 3. Raw IPv4 / CIDR or named IP regex
   const ipv4Regex = /^\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,2})?$/;
   const namedIpRegex = /^(?:ip|host|ip-address|ip_address)[-_](\d{1,3}(?:\.\d{1,3}){3})/i;
 
   if (ipv4Regex.test(token)) {
-    return { isDomestic: false, isForeign: false, isStaticIp: true, ipDisplay: token, riskLevel: "static_ip", token, isHeuristic: false };
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: false,
+      isForeign: false,
+      isStaticIp: true,
+      ipDisplay: token,
+      riskLevel: "static_ip",
+      isHeuristic: false,
+      isGeoObject: false,
+      geoDisplay: "",
+    };
   }
   const namedMatch = namedIpRegex.exec(token);
   if (namedMatch) {
-    return { isDomestic: false, isForeign: false, isStaticIp: true, ipDisplay: namedMatch[1], riskLevel: "static_ip", token, isHeuristic: false };
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: false,
+      isForeign: false,
+      isStaticIp: true,
+      ipDisplay: namedMatch[1],
+      riskLevel: "static_ip",
+      isHeuristic: false,
+      isGeoObject: false,
+      geoDisplay: "",
+    };
   }
 
-  // 3. Exact domestic match
-  if (DOMESTIC_VPN_TOKENS.has(lower)) {
-    return { isDomestic: true, isForeign: false, isStaticIp: false, countryName: "Israel / Domestic", riskLevel: "domestic", token, isHeuristic: false };
+  // 4. Exact domestic match
+  if (DOMESTIC_VPN_TOKENS.has(lower) || tokenUpper === "IL" || tokenUpper === "ISR") {
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: true,
+      isForeign: false,
+      isStaticIp: false,
+      countryName: "Israel",
+      isoCode: "IL",
+      riskLevel: "domestic",
+      isHeuristic: false,
+      isGeoObject: true,
+      geoDisplay: `${token} (IL)`,
+    };
   }
 
-  // 4. Exact Country Name Match on the Full Token (Direct country address object)
-  const tokenUpper = token.toUpperCase();
-  if (CONFIGURABLE_HIGH_RISK_COUNTRIES[tokenUpper]) {
-    return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: CONFIGURABLE_HIGH_RISK_COUNTRIES[tokenUpper], riskLevel: "high", token, isHeuristic: false };
+  // 5. Exact Country Name Match on the Full Token (Direct country address object)
+  if (HIGH_RISK_VPN_COUNTRIES[tokenUpper]) {
+    const cName = HIGH_RISK_VPN_COUNTRIES[tokenUpper];
+    const isoCode = tokenUpper.length === 2 ? tokenUpper : (Object.entries(HIGH_RISK_VPN_COUNTRIES).find(([, v]) => v === cName && v.length === 2)?.[0] || tokenUpper);
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: false,
+      isForeign: true,
+      isStaticIp: false,
+      countryName: cName,
+      isoCode,
+      riskLevel: "high",
+      isHeuristic: false,
+      isGeoObject: true,
+      geoDisplay: `${token} (${isoCode})`,
+    };
   }
   if (KNOWN_COUNTRY_NAMES[lower]) {
-    const isHigh = !!CONFIGURABLE_HIGH_RISK_COUNTRIES[tokenUpper];
-    return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: KNOWN_COUNTRY_NAMES[lower], riskLevel: isHigh ? "high" : "general", token, isHeuristic: false };
+    const isHigh = !!HIGH_RISK_VPN_TOKENS.has(lower);
+    const countryName = KNOWN_COUNTRY_NAMES[lower];
+    const isoCode = tokenUpper.length === 2 ? tokenUpper : (Object.entries(ISO_COUNTRY_NAMES).find(([, v]) => v.toLowerCase() === lower && v.length === 2)?.[0] || tokenUpper);
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: false,
+      isForeign: true,
+      isStaticIp: false,
+      countryName,
+      isoCode,
+      riskLevel: isHigh ? "high" : "general",
+      isHeuristic: false,
+      isGeoObject: true,
+      geoDisplay: `${token} (${isoCode})`,
+    };
   }
   if (GENERAL_FOREIGN_VPN_COUNTRIES[tokenUpper]) {
-    return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: GENERAL_FOREIGN_VPN_COUNTRIES[tokenUpper], riskLevel: "general", token, isHeuristic: false };
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: false,
+      isForeign: true,
+      isStaticIp: false,
+      countryName: GENERAL_FOREIGN_VPN_COUNTRIES[tokenUpper],
+      isoCode: tokenUpper,
+      riskLevel: "general",
+      isHeuristic: false,
+      isGeoObject: true,
+      geoDisplay: `${token} (${tokenUpper})`,
+    };
   }
 
+  // 6. Word-boundary heuristics
   const words = token.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
-
-  // 5. Substring / Word-boundary Heuristics: Treat as HEURISTIC_SUSPECT (operational review), NOT instant FAIL!
   for (const w of words) {
     const wUpper = w.toUpperCase();
-    if (CONFIGURABLE_HIGH_RISK_COUNTRIES[wUpper]) {
-      return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: CONFIGURABLE_HIGH_RISK_COUNTRIES[wUpper], riskLevel: "heuristic_suspect", token, isHeuristic: true, heuristicOrigin: CONFIGURABLE_HIGH_RISK_COUNTRIES[wUpper] };
-    }
-    if (HIGH_RISK_VPN_TOKENS.has(w)) {
-      const mapped = KNOWN_COUNTRY_NAMES[w] || CONFIGURABLE_HIGH_RISK_COUNTRIES[wUpper] || (w.length <= 3 ? wUpper : (w.charAt(0).toUpperCase() + w.slice(1)));
-      return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: mapped, riskLevel: "heuristic_suspect", token, isHeuristic: true, heuristicOrigin: mapped };
+    if (HIGH_RISK_VPN_COUNTRIES[wUpper] || HIGH_RISK_VPN_TOKENS.has(w)) {
+      const mapped = HIGH_RISK_VPN_COUNTRIES[wUpper] || KNOWN_COUNTRY_NAMES[w] || (w.length <= 3 ? wUpper : (w.charAt(0).toUpperCase() + w.slice(1)));
+      const iso = wUpper.length === 2 ? wUpper : "";
+      return {
+        token,
+        isWildcard: false,
+        isDomestic: false,
+        isForeign: true,
+        isStaticIp: false,
+        countryName: mapped,
+        isoCode: iso || wUpper,
+        riskLevel: "heuristic_suspect",
+        isHeuristic: true,
+        heuristicOrigin: mapped,
+        isGeoObject: true,
+        geoDisplay: `${token} (${iso || wUpper})`,
+      };
     }
   }
 
   for (const w of words) {
     const wUpper = w.toUpperCase();
-    if (GENERAL_FOREIGN_VPN_COUNTRIES[wUpper]) {
-      return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: GENERAL_FOREIGN_VPN_COUNTRIES[wUpper], riskLevel: "heuristic_suspect", token, isHeuristic: true, heuristicOrigin: GENERAL_FOREIGN_VPN_COUNTRIES[wUpper] };
-    }
-    if (KNOWN_COUNTRY_NAMES[w]) {
-      return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: KNOWN_COUNTRY_NAMES[w], riskLevel: "heuristic_suspect", token, isHeuristic: true, heuristicOrigin: KNOWN_COUNTRY_NAMES[w] };
-    }
-    if (GENERAL_FOREIGN_VPN_TOKENS.has(w)) {
-      const mapped = GENERAL_FOREIGN_VPN_COUNTRIES[wUpper] || (w.length <= 3 ? wUpper : (w.charAt(0).toUpperCase() + w.slice(1)));
-      return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: mapped, riskLevel: "heuristic_suspect", token, isHeuristic: true, heuristicOrigin: mapped };
+    if (GENERAL_FOREIGN_VPN_COUNTRIES[wUpper] || GENERAL_FOREIGN_VPN_TOKENS.has(w)) {
+      const mapped = GENERAL_FOREIGN_VPN_COUNTRIES[wUpper] || KNOWN_COUNTRY_NAMES[w] || (w.length <= 3 ? wUpper : (w.charAt(0).toUpperCase() + w.slice(1)));
+      const iso = wUpper.length === 2 ? wUpper : "";
+      return {
+        token,
+        isWildcard: false,
+        isDomestic: false,
+        isForeign: true,
+        isStaticIp: false,
+        countryName: mapped,
+        isoCode: iso || wUpper,
+        riskLevel: "heuristic_suspect",
+        isHeuristic: true,
+        heuristicOrigin: mapped,
+        isGeoObject: true,
+        geoDisplay: `${token} (${iso || wUpper})`,
+      };
     }
   }
 
-  // 5. If no country pattern, check if address object has a subnet
-  if (addrObj && addrObj.type !== "geography" && addrObj.subnet) {
-    const subnetIpMatch = /(\d{1,3}(?:\.\d{1,3}){3})/.exec(addrObj.subnet);
-    const ipDisp = subnetIpMatch ? subnetIpMatch[1] : token;
-    return { isDomestic: false, isForeign: false, isStaticIp: true, ipDisplay: ipDisp, riskLevel: "static_ip", token, isHeuristic: false };
-  }
-
-  // 6. Generic domestic keywords in words
   for (const w of words) {
     if (DOMESTIC_VPN_TOKENS.has(w)) {
-      return { isDomestic: true, isForeign: false, isStaticIp: false, countryName: "Israel / Domestic", riskLevel: "domestic", token, isHeuristic: false };
+      return {
+        token,
+        isWildcard: false,
+        isDomestic: true,
+        isForeign: false,
+        isStaticIp: false,
+        countryName: "Israel",
+        isoCode: "IL",
+        riskLevel: "domestic",
+        isHeuristic: false,
+        isGeoObject: true,
+        geoDisplay: `${token} (IL)`,
+      };
     }
   }
 
-  // 7. Default Deny: ANY address object whose name/token is NOT Israel and NOT Static IP is Foreign!
+  // 7. Check if token name looks like a subnet/host
+  if (/subnet|lan|net|ip|srv|host|internal|dmz|mgmt/i.test(token)) {
+    return {
+      token,
+      isWildcard: false,
+      isDomestic: false,
+      isForeign: false,
+      isStaticIp: true,
+      ipDisplay: token,
+      riskLevel: "static_ip",
+      isHeuristic: false,
+      isGeoObject: false,
+      geoDisplay: "",
+    };
+  }
+
+  // 8. Default Deny: Unrecognized name treated as Foreign
   const cleanName = token.replace(/^(?:geo|country|foreign)[-_]/i, "").trim() || token;
   const formattedName = cleanName.charAt(0).toUpperCase() + cleanName.slice(1);
-  return { isDomestic: false, isForeign: true, isStaticIp: false, countryName: formattedName, riskLevel: "general", token, isHeuristic: false };
+  return {
+    token,
+    isWildcard: false,
+    isDomestic: false,
+    isForeign: true,
+    isStaticIp: false,
+    countryName: formattedName,
+    isoCode: token.length === 2 ? token.toUpperCase() : "",
+    riskLevel: "general",
+    isHeuristic: false,
+    isGeoObject: true,
+    geoDisplay: token.length === 2 ? `${token} (${token.toUpperCase()})` : token,
+  };
+}
+
+function buildSecVpn01ObservedState({
+  configStatus,
+  geoObjectsList,
+  allowedCountriesStr,
+  geoBypassRisk,
+  riskAssessment,
+  additionalBullets = [],
+}) {
+  const geoObjStr = geoObjectsList && geoObjectsList.length > 0 ? geoObjectsList.join(", ") : "None";
+  const riskStr = (geoBypassRisk === "None" || geoBypassRisk === "Low")
+    ? "None - Gateway strictly constrained to authorized domestic IP space"
+    : "High - Unrestricted internet access";
+
+  const lines = [
+    `Configuration Status: ${configStatus}`,
+    `Configured Geo-Objects: ${geoObjStr}`,
+    `Allowed Countries: ${allowedCountriesStr}`,
+    `Geo-Bypass / Leakage Risk: ${riskStr}`,
+  ];
+
+  const bullets = [];
+  if (riskAssessment) {
+    bullets.push(riskAssessment);
+  }
+  if (additionalBullets && additionalBullets.length > 0) {
+    bullets.push(...additionalBullets);
+  }
+
+  for (const b of bullets) {
+    lines.push(`  • ${b}`);
+  }
+
+  return lines.join("\n");
 }
 
 function bucketSslVpnPolicies(policies) {
@@ -5266,15 +5560,16 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
   }
 
   // 2. Scan and Filter for ACTIVE SSL-VPN VDOMs
-  // Ignore dormant / unconfigured VDOMs where SSL-VPN is disabled or not configured
   const activeVdomData = [];
 
   for (const vdom of candidateVdoms) {
     let hasVpnSec = false;
     let status = "";
     let rawSourceAddr = "";
+    let rawSourceAddrNegate = "";
     const authRuleTokens = [];
     let hasAuthRules = false;
+    let hasAuthRuleNegate = false;
 
     if (tokenizer) {
       const vpnSec = tokenizer.getSection("vpn ssl settings", vdom);
@@ -5282,6 +5577,7 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
         hasVpnSec = true;
         status = cleanVal(tokenizer.getProperty("vpn ssl settings", "status", vdom) || "").toLowerCase();
         rawSourceAddr = tokenizer.getProperty("vpn ssl settings", "source-address", vdom) || "";
+        rawSourceAddrNegate = cleanVal(tokenizer.getProperty("vpn ssl settings", "source-address-negate", vdom) || "").toLowerCase();
       }
       const authRules =
         tokenizer.getEntries("authentication-rule", vdom) ||
@@ -5296,6 +5592,8 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
           if (ruleSrc) {
             authRuleTokens.push(...extractQuotedTokens(ruleSrc));
           }
+          const ruleNeg = cleanVal(rule.properties?.["source-address-negate"] || "").toLowerCase();
+          if (ruleNeg === "enable") hasAuthRuleNegate = true;
         }
       }
     } else {
@@ -5308,6 +5606,8 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
         if (sm) status = cleanVal(sm[1]).toLowerCase();
         const am = /set\s+source-address\s+([^\n]+)/i.exec(vpnBody);
         if (am) rawSourceAddr = am[1].trim();
+        const anm = /set\s+source-address-negate\s+(\S+)/i.exec(vpnBody);
+        if (anm) rawSourceAddrNegate = cleanVal(anm[1]).toLowerCase();
 
         const ruleBlock = /config\s+authentication-rule([\s\S]*?)(?:^end|\n\s*end)/im.exec(vpnBody);
         if (ruleBlock) {
@@ -5319,6 +5619,8 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
             if (ram) {
               authRuleTokens.push(...extractQuotedTokens(ram[1].trim()));
             }
+            const rnm = /set\s+source-address-negate\s+(\S+)/i.exec(em[1]);
+            if (rnm && cleanVal(rnm[1]).toLowerCase() === "enable") hasAuthRuleNegate = true;
           }
         }
       }
@@ -5332,21 +5634,14 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       return hasSslSrc && p.action === "accept";
     });
 
-    // If status is explicitly 'disable', SSL-VPN is disabled in this VDOM -> dormant
     if (status === "disable") {
       continue;
     }
 
-    // If section doesn't exist AND no SSL policies exist -> not an SSL-VPN VDOM
     if (!hasVpnSec && vdomSslPolicies.length === 0) {
       continue;
     }
 
-    // An active SSL-VPN VDOM must meet at least ONE active indicator:
-    // a. status === 'enable'
-    // b. Active firewall policies with srcintf 'ssl'
-    // c. source-address configured (non-empty)
-    // d. authentication-rules configured
     const isActive =
       status === "enable" ||
       vdomSslPolicies.length > 0 ||
@@ -5354,7 +5649,6 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       hasAuthRules;
 
     if (!isActive) {
-      // Dormant/unconfigured VDOM -> ignore
       continue;
     }
 
@@ -5363,32 +5657,63 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       hasVpnSec,
       status,
       rawSourceAddr,
+      rawSourceAddrNegate,
       authRuleTokens,
       hasAuthRules,
+      hasAuthRuleNegate,
       vdomPolicies,
       vdomSslPolicies,
     });
   }
 
-  // If no active SSL-VPN VDOM was found across the appliance, return null
   if (activeVdomData.length === 0) {
     return null;
   }
 
   function evaluateActiveVdom(vdomObj) {
-    const { vdom, rawSourceAddr, authRuleTokens, vdomSslPolicies } = vdomObj;
+    const { vdom, rawSourceAddr, rawSourceAddrNegate, authRuleTokens, hasAuthRuleNegate, vdomSslPolicies } = vdomObj;
 
     const topTokens = rawSourceAddr ? extractQuotedTokens(rawSourceAddr) : [];
     const allTokens = [...topTokens, ...authRuleTokens];
+    const isNegated = rawSourceAddrNegate === "enable" || hasAuthRuleNegate;
 
-    // 1. Missing or unconfigured source-address parameter
+    // Case 1: Inverted match (source-address-negate enable)
+    if (isNegated) {
+      const findingText = buildSecVpn01ObservedState({
+        configStatus: `Inverted Match (source-address-negate enabled with ${topTokens.join(", ") || "specified entities"})`,
+        geoObjectsList: topTokens.map((t) => `${t} (Negated)`),
+        allowedCountriesStr: "Global / Worldwide (All 195+ countries permitted - Negation inverts restriction)",
+        geoBypassRisk: "High",
+        riskAssessment: "Technical assessment: Inverted source-address negation permits connections from all global origins outside specified entities.",
+        additionalBullets: [
+          "Impact: Negating source-address allows any source IP worldwide to access the SSL-VPN portal, bypassing geo-fencing."
+        ]
+      });
+      return makeFinding({
+        id: "SEC-VPN-01",
+        component: "SSL VPN Geo-Fencing",
+        status: "FAIL",
+        category: "SecOps Operational",
+        source: src,
+        data: { vdom, negated: true },
+        findingText,
+        actionText: "Disable source-address-negate and explicitly bind source-address strictly to domestic Israel IP space under config vpn ssl settings.",
+        remediationCli: remCli,
+      });
+    }
+
+    // Case 2: Missing or unconfigured source-address parameter
     if (topTokens.length === 0 && authRuleTokens.length === 0) {
-      const findingText = [
-        "Critical SSL-VPN Exposure (No Geo-Fencing):",
-        "  • Configuration Status: source-address is unconfigured / set to 'all'",
-        "  • Allowed Source Scope: All global source IP addresses permitted",
-        "  • Impact: SSL-VPN gateway is unconstrained and exposed to brute-force attacks, botnets, and zero-day exploit targeting worldwide."
-      ].join("\n");
+      const findingText = buildSecVpn01ObservedState({
+        configStatus: "Missing / Unset",
+        geoObjectsList: [],
+        allowedCountriesStr: "Global / Worldwide (All 195+ countries permitted - No geo-restriction applied)",
+        geoBypassRisk: "High",
+        riskAssessment: "Technical assessment: Unauthenticated global sources can reach the SSL-VPN listener directly without geo-filtering.",
+        additionalBullets: [
+          "Impact: SSL-VPN gateway is unconstrained and exposed to brute-force attacks, botnets, and zero-day exploit targeting worldwide."
+        ]
+      });
       return makeFinding({
         id: "SEC-VPN-01",
         component: "SSL VPN Geo-Fencing",
@@ -5402,14 +5727,18 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       });
     }
 
-    // 2. Explicit 'all' global access
-    if (allTokens.some((t) => t.toLowerCase() === "all")) {
-      const findingText = [
-        "Critical SSL-VPN Exposure (No Geo-Fencing):",
-        "  • Configuration Status: source-address is unconfigured / set to 'all'",
-        "  • Allowed Source Scope: All global source IP addresses permitted",
-        "  • Impact: SSL-VPN gateway is unconstrained and exposed to brute-force attacks, botnets, and zero-day exploit targeting worldwide."
-      ].join("\n");
+    // Case 3: Explicit 'all' global access
+    if (allTokens.some((t) => t.toLowerCase() === "all" || t.toLowerCase() === "all_ipv4")) {
+      const findingText = buildSecVpn01ObservedState({
+        configStatus: "Explicitly set to 'all'",
+        geoObjectsList: [],
+        allowedCountriesStr: "Global / Worldwide (All 195+ countries permitted - No geo-restriction applied)",
+        geoBypassRisk: "High",
+        riskAssessment: "Technical assessment: Gateway perimeter permits authentication handshakes from any origin worldwide.",
+        additionalBullets: [
+          "Impact: SSL-VPN gateway is unconstrained and exposed to brute-force attacks, botnets, and zero-day exploit targeting worldwide."
+        ]
+      });
       return makeFinding({
         id: "SEC-VPN-01",
         component: "SSL VPN Geo-Fencing",
@@ -5423,24 +5752,16 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       });
     }
 
-    // 3. Resolve Address Groups & Addresses
-    const addrMap = getFirewallAddressMap(tokenizer, rawText);
-    const grpMap = getFirewallAddrGroupMap(tokenizer, rawText);
+    // Case 4: Resolve Address Groups & Addresses Recursively
+    const addrMap = getFirewallAddressMap(tokenizer, rawText, vdom);
+    const grpMap = getFirewallAddrGroupMap(tokenizer, rawText, vdom);
 
     const expandedTokens = [];
     for (const t of allTokens) {
-      const lower = t.toLowerCase();
-      let grp = grpMap ? (grpMap.get(lower) || grpMap.get(`${vdom}::${lower}`) || grpMap.get(`root::${lower}`)) : null;
-      if (!grp && grpMap) {
-        for (const [k, v] of grpMap.entries()) {
-          if (k === lower || k.endsWith(`::${lower}`)) {
-            grp = v;
-            break;
-          }
-        }
-      }
-      if (grp && grp.members && grp.members.length > 0) {
-        expandedTokens.push(...grp.members);
+      const visited = new Set();
+      const leafMembers = resolveAddrGroupMembersRecursive(t, grpMap, visited);
+      if (leafMembers.length > 0) {
+        expandedTokens.push(...leafMembers);
       } else {
         expandedTokens.push(t);
       }
@@ -5448,23 +5769,73 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
 
     const uniqueTokens = [...new Set(expandedTokens)];
 
-    // 4. Classify each entity against Israel Baseline vs Foreign Countries vs Static IPs
+    // Classify each leaf entity
     const classified = uniqueTokens.map((t) => classifyVpnSourceEntity(t, addrMap));
-    const domesticEntities = classified.filter((c) => c.isDomestic).map((c) => c.token);
-    const staticIpEntities = classified.filter((c) => c.isStaticIp);
+
+    // If an unwrapped group member was 'all' or wildcard
+    if (classified.some((c) => c.isWildcard)) {
+      const findingText = buildSecVpn01ObservedState({
+        configStatus: "Explicitly set to 'all' (via address group membership)",
+        geoObjectsList: [],
+        allowedCountriesStr: "Global / Worldwide (All 195+ countries permitted - No geo-restriction applied)",
+        geoBypassRisk: "High",
+        riskAssessment: "Technical assessment: Underlying address group members contain wildcard 'all', permitting handshakes from any origin worldwide.",
+        additionalBullets: [
+          "Impact: SSL-VPN gateway is unconstrained and exposed to brute-force attacks, botnets, and zero-day exploit targeting worldwide."
+        ]
+      });
+      return makeFinding({
+        id: "SEC-VPN-01",
+        component: "SSL VPN Geo-Fencing",
+        status: "FAIL",
+        category: "SecOps Operational",
+        source: src,
+        data: { vdom, explicitAll: true },
+        findingText,
+        actionText: "Remove 'all' from address groups and restrict source-address strictly to domestic Israel country address objects.",
+        remediationCli: remCli,
+      });
+    }
+
+    const geoEntities = classified.filter((c) => c.isGeoObject);
+    const domesticEntities = classified.filter((c) => c.isDomestic);
     const foreignEntities = classified.filter((c) => c.isForeign);
+    const staticIpEntities = classified.filter((c) => c.isStaticIp);
 
-    const highRiskEntities = foreignEntities.filter((c) => c.riskLevel === "high" && !c.isHeuristic);
-    const heuristicEntities = foreignEntities.filter((c) => c.isHeuristic);
-    const additionalForeignEntities = foreignEntities.filter((c) => c.riskLevel !== "high" && !c.isHeuristic);
-
-    const highRiskCountryNames = [...new Set(highRiskEntities.map((c) => c.countryName))];
-    const heuristicSuspectNames = [...new Set(heuristicEntities.map((c) => `${c.token} (${c.countryName})`))];
-    const additionalForeignCountryNames = [...new Set(additionalForeignEntities.map((c) => c.countryName))];
-    const allForeignCountryNames = [...new Set([...highRiskCountryNames, ...additionalForeignCountryNames, ...heuristicEntities.map((c) => c.countryName)])];
+    const geoObjectsList = [...new Set(geoEntities.map((c) => c.geoDisplay || `${c.token} (${c.isoCode || c.countryName})`))];
+    const domesticGeoList = [...new Set(domesticEntities.map((c) => `${c.countryName} (${c.isoCode || "IL"})`))];
+    const foreignGeoList = [...new Set(foreignEntities.map((c) => `${c.countryName} (${c.isoCode || ""})`))];
+    const allAllowedCountriesList = [...new Set([...domesticGeoList, ...foreignGeoList])];
     const staticIpList = [...new Set(staticIpEntities.map((c) => c.ipDisplay || c.token))];
 
-    // 5. Correlate with active SSL-VPN Firewall Policies
+    // Subcase 4A: Only Non-Geo IP Ranges/Subnets Configured (Zero Geo-Objects)
+    if (geoEntities.length === 0 && staticIpEntities.length > 0) {
+      const subnetStr = staticIpList.join(", ");
+      const findingText = buildSecVpn01ObservedState({
+        configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+        geoObjectsList: [],
+        allowedCountriesStr: `Static Subnets Only (Non-geographic: ${subnetStr}) - Geo-Fencing not enforced`,
+        geoBypassRisk: "High",
+        riskAssessment: "Technical assessment: Geographic geo-fencing is not enforced at the SSL-VPN gateway; access control relies solely on static IP subnets.",
+        additionalBullets: [
+          `Configured Static IPs/Subnets: ${subnetStr}`,
+          "SecOps Review: Geo-fencing country database is unutilized. Recommend adding domestic geographic boundary (Israel) to block unrouted/external scan probes."
+        ]
+      });
+      return makeFinding({
+        id: "SEC-VPN-01",
+        component: "SSL VPN Geo-Fencing",
+        status: "WARN",
+        category: "SecOps Operational",
+        source: src,
+        data: { vdom, staticOnly: true, staticIps: staticIpList },
+        findingText,
+        actionText: "Incorporate domestic Israel geography address objects ('Israel' / 'IL') into source-address under config vpn ssl settings.",
+        remediationCli: remCli,
+      });
+    }
+
+    // Correlate with active SSL-VPN Firewall Policies
     const activeSslPolicies = vdomSslPolicies.filter(
       (p) => p.status !== "disable" && (!p.schedInfo || p.schedInfo.isActive)
     );
@@ -5478,9 +5849,16 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
     });
     const hasActiveUnrestrictedPolicy = activeUnrestrictedPolicies.length > 0;
 
-    // Severity Decision Logic
-    // Case A: FAIL - If confirmed foreign country is authorized AND correlated policy allows dstaddr 'all' with service ALL
-    if ((highRiskCountryNames.length > 0 || additionalForeignCountryNames.length > 0) && hasActiveUnrestrictedPolicy) {
+    const highRiskEntities = foreignEntities.filter((c) => c.riskLevel === "high" && !c.isHeuristic);
+    const heuristicEntities = foreignEntities.filter((c) => c.isHeuristic);
+    const additionalForeignEntities = foreignEntities.filter((c) => c.riskLevel !== "high" && !c.isHeuristic);
+
+    const highRiskCountryNames = [...new Set(highRiskEntities.map((c) => `${c.countryName} (${c.isoCode})`))];
+    const additionalForeignCountryNames = [...new Set(additionalForeignEntities.map((c) => `${c.countryName} (${c.isoCode})`))];
+    const heuristicSuspectNames = [...new Set(heuristicEntities.map((c) => `${c.token} (${c.countryName})`))];
+
+    // Case 5: Confirmed foreign country authorized AND unrestricted internal policy
+    if (foreignEntities.length > 0 && hasActiveUnrestrictedPolicy) {
       const exposingPolStr = activeUnrestrictedPolicies.map((p) => {
         const namePart = p.name ? ` ("${p.name}")` : "";
         const dstPart = p.dstaddr.join(", ");
@@ -5488,21 +5866,22 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
         return `Policy ID ${p.id}${namePart} -> dst: ${dstPart} (service: ${svcPart})`;
       }).join("; ");
 
-      const lines = [
-        "Critical Internal Exposure via SSL-VPN:"
-      ];
-      if (highRiskCountryNames.length > 0) {
-        lines.push(`  • High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
-      }
-      if (additionalForeignCountryNames.length > 0) {
-        lines.push(`  • Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
-      }
-      if (staticIpList.length > 0) {
-        lines.push(`  • Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
-      }
-      lines.push(`  • Exposing Firewall Policies: ${exposingPolStr}`);
-      lines.push("  • Destination & Scope: dstaddr 'all' | service: ALL (Full internal network access)");
-      lines.push("  • Impact: Direct compromise vector from foreign IP space into entire corporate network.");
+      const bullets = [];
+      if (highRiskCountryNames.length > 0) bullets.push(`High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
+      if (additionalForeignCountryNames.length > 0) bullets.push(`Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
+      if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
+      bullets.push(`Exposing Firewall Policies: ${exposingPolStr}`);
+      bullets.push("Destination & Scope: dstaddr 'all' | service: ALL (Full internal network access)");
+      bullets.push("Impact: Direct compromise vector from foreign IP space into entire corporate network.");
+
+      const findingText = buildSecVpn01ObservedState({
+        configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+        geoObjectsList,
+        allowedCountriesStr: allAllowedCountriesList.join(", "),
+        geoBypassRisk: "High",
+        riskAssessment: "Technical assessment: Foreign countries authorized to reach SSL-VPN listener with unrestricted internal network access (dstaddr 'all').",
+        additionalBullets: bullets
+      });
 
       return makeFinding({
         id: "SEC-VPN-01",
@@ -5515,41 +5894,39 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
           highRiskCountries: highRiskCountryNames,
           additionalCountries: additionalForeignCountryNames,
           suspectHeuristics: heuristicSuspectNames,
-          domesticEntities,
+          domesticEntities: domesticEntities.map((d) => d.token),
           staticIps: staticIpList,
           exposingPolicies: activeUnrestrictedPolicies,
         },
-        findingText: lines.join("\n"),
+        findingText,
         actionText: "Immediately restrict SSL-VPN destination subnets, notify client (Checklist ID 13), and remove unauthorized foreign countries from source-address to mitigate brute-force and SSL-VPN exploit exposure.",
         remediationCli: remCli,
       });
     }
 
-    // Case B: WARN - Foreign Country Access Detected (outside Israel baseline)
-    if (allForeignCountryNames.length > 0) {
-      const foreignListStr = allForeignCountryNames.join(", ");
-
-      // Subcase B.1: Expired
+    // Case 6: Foreign Country Access Detected (outside Israel baseline)
+    if (foreignEntities.length > 0) {
       if (activeSslPolicies.length === 0 && expiredSslPolicies.length > 0) {
         const expiredPolIds = expiredSslPolicies.map((p) => p.id).join(", ");
         const expiredSchedNames = [...new Set(expiredSslPolicies.map((p) => p.schedInfo.scheduleName))].join(", ");
         const expiredDates = [...new Set(expiredSslPolicies.map((p) => p.schedInfo.dateOnlyStr || p.schedInfo.endStr || "Expired"))].join(", ");
 
-        const lines = [
-          `Stale Foreign Origin Configuration: Foreign country [${foreignListStr}] authorized in SSL-VPN gateway, but Policy ID [${expiredPolIds}] has EXPIRED schedule [${expiredSchedNames}] (Expired: ${expiredDates}). Firewall blocks internal traffic, but VPN gateway still accepts external handshakes.`
-        ];
-        if (highRiskCountryNames.length > 0) {
-          lines.push(`  • High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
-        }
-        if (additionalForeignCountryNames.length > 0) {
-          lines.push(`  • Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
-        }
-        if (staticIpList.length > 0) {
-          lines.push(`  • Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
-        }
-        lines.push(`  • Expired Firewall Policy: Policy ID ${expiredPolIds} with EXPIRED schedule [${expiredSchedNames}] (Expired: ${expiredDates})`);
-        lines.push("  • Traffic Status: Firewall blocks internal traffic (schedule expired), but VPN gateway still accepts external handshakes.");
-        lines.push(`  • SecOps Review: Confirm employee has concluded travel. Remove obsolete foreign country from SSL-VPN source-address and delete/archive expired policy ID [${expiredPolIds}] (Checklist ID 13).`);
+        const bullets = [];
+        if (highRiskCountryNames.length > 0) bullets.push(`High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
+        if (additionalForeignCountryNames.length > 0) bullets.push(`Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
+        if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
+        bullets.push(`Expired Firewall Policy: Policy ID ${expiredPolIds} with EXPIRED schedule [${expiredSchedNames}] (Expired: ${expiredDates})`);
+        bullets.push("Traffic Status: Firewall blocks internal traffic (schedule expired), but VPN gateway still accepts external handshakes.");
+        bullets.push(`SecOps Review: Confirm employee has concluded travel. Remove obsolete foreign country from SSL-VPN source-address and delete/archive expired policy ID [${expiredPolIds}] (Checklist ID 13).`);
+
+        const findingText = buildSecVpn01ObservedState({
+          configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+          geoObjectsList,
+          allowedCountriesStr: allAllowedCountriesList.join(", "),
+          geoBypassRisk: "High",
+          riskAssessment: "Technical assessment: Stale Foreign Origin: Gateway listener accepts external handshakes despite expired firewall schedule.",
+          additionalBullets: bullets
+        });
 
         return makeFinding({
           id: "SEC-VPN-01",
@@ -5562,35 +5939,34 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
             highRiskCountries: highRiskCountryNames,
             additionalCountries: additionalForeignCountryNames,
             suspectHeuristics: heuristicSuspectNames,
-            domesticEntities,
+            domesticEntities: domesticEntities.map((d) => d.token),
             staticIps: staticIpList,
             expiredPolicies: expiredSslPolicies,
           },
-          findingText: lines.join("\n"),
+          findingText,
           actionText: `Confirm employee has concluded travel. Remove obsolete foreign country from SSL-VPN source-address and delete/archive expired policy ID [${expiredPolIds}] (Checklist ID 13).`,
           remediationCli: remCli,
         });
       }
 
-      // Subcase B.2: Disabled
       if (activeSslPolicies.length === 0 && disabledSslPolicies.length > 0) {
         const disabledPolIds = disabledSslPolicies.map((p) => p.id).join(", ");
+        const bullets = [];
+        if (highRiskCountryNames.length > 0) bullets.push(`High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
+        if (additionalForeignCountryNames.length > 0) bullets.push(`Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
+        if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
+        bullets.push(`Disabled Firewall Policy: Policy ID ${disabledPolIds} (Status: disabled)`);
+        bullets.push("Traffic Status: Firewall blocks internal traffic (policy disabled), but VPN gateway still accepts external handshakes.");
+        bullets.push(`SecOps Review: Confirm employee has concluded travel. Remove obsolete foreign country from SSL-VPN source-address and delete/archive disabled policy ID [${disabledPolIds}] (Checklist ID 13).`);
 
-        const lines = [
-          `Stale Foreign Origin Configuration: Foreign country [${foreignListStr}] authorized in SSL-VPN gateway, but Policy ID [${disabledPolIds}] is DISABLED. Firewall blocks internal traffic, but VPN gateway still accepts external handshakes.`
-        ];
-        if (highRiskCountryNames.length > 0) {
-          lines.push(`  • High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
-        }
-        if (additionalForeignCountryNames.length > 0) {
-          lines.push(`  • Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
-        }
-        if (staticIpList.length > 0) {
-          lines.push(`  • Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
-        }
-        lines.push(`  • Disabled Firewall Policy: Policy ID ${disabledPolIds} (Status: disabled)`);
-        lines.push("  • Traffic Status: Firewall blocks internal traffic (policy disabled), but VPN gateway still accepts external handshakes.");
-        lines.push(`  • SecOps Review: Confirm employee has concluded travel. Remove obsolete foreign country from SSL-VPN source-address and delete/archive disabled policy ID [${disabledPolIds}] (Checklist ID 13).`);
+        const findingText = buildSecVpn01ObservedState({
+          configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+          geoObjectsList,
+          allowedCountriesStr: allAllowedCountriesList.join(", "),
+          geoBypassRisk: "High",
+          riskAssessment: "Technical assessment: Stale Foreign Origin: Gateway listener accepts external handshakes despite disabled firewall policy.",
+          additionalBullets: bullets
+        });
 
         return makeFinding({
           id: "SEC-VPN-01",
@@ -5603,65 +5979,47 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
             highRiskCountries: highRiskCountryNames,
             additionalCountries: additionalForeignCountryNames,
             suspectHeuristics: heuristicSuspectNames,
-            domesticEntities,
+            domesticEntities: domesticEntities.map((d) => d.token),
             staticIps: staticIpList,
             disabledPolicies: disabledSslPolicies,
           },
-          findingText: lines.join("\n"),
+          findingText,
           actionText: `Confirm employee has concluded travel. Remove obsolete foreign country from SSL-VPN source-address and delete/archive disabled policy ID [${disabledPolIds}] (Checklist ID 13).`,
           remediationCli: remCli,
         });
       }
 
-      // Subcase B.3: Active
+      // Active foreign policies
       const polSummaryLines = [];
-      let b = null;
-      if (activeSslPolicies.length === 0) {
-        polSummaryLines.push("  • Associated Access Scope (0 Policies):");
-        polSummaryLines.push("    • No Active Inbound Policies: Traffic blocked at firewall policy layer");
-      } else {
-        b = bucketSslVpnPolicies(activeSslPolicies);
-        polSummaryLines.push(`  • Associated Access Scope (${activeSslPolicies.length} ${activeSslPolicies.length === 1 ? "Policy" : "Policies"}):`);
-
-        if (b.wan.length > 0) {
-          polSummaryLines.push(`    • WAN / Full Access (dst: all): Policy [${b.wan.map((p) => p.id).join(", ")}]`);
-        }
-        if (b.rdp.length > 0) {
-          polSummaryLines.push(`    • Remote Desktop (RDP): ${b.rdp.length} ${b.rdp.length === 1 ? "policy" : "policies"} (Policy [${b.rdp.map((p) => p.id).join(", ")}])`);
-        }
-        if (b.smb.length > 0) {
-          polSummaryLines.push(`    • File Shares (SMB): ${b.smb.length} ${b.smb.length === 1 ? "policy" : "policies"} (Policy [${b.smb.map((p) => p.id).join(", ")}])`);
-        }
-        if (b.mgmt.length > 0) {
-          polSummaryLines.push(`    • Management Access: Policy [${b.mgmt.map((p) => p.id).join(", ")}]`);
-        }
-        if (b.standard.length > 0) {
-          polSummaryLines.push(`    • Standard Services: ${b.standard.length} remaining ${b.standard.length === 1 ? "policy" : "policies"}`);
-        }
-        if (expiredSslPolicies.length > 0) {
-          polSummaryLines.push(`    • Stale / Expired Policies: Policy ID ${expiredSslPolicies.map((p) => p.id).join(", ")} [Schedule: ${expiredSslPolicies.map((p) => p.schedInfo.scheduleName).join(", ")}] (Expired)`);
-        }
+      const b = bucketSslVpnPolicies(activeSslPolicies);
+      if (activeSslPolicies.length > 0) {
+        polSummaryLines.push(`Associated Access Scope (${activeSslPolicies.length} ${activeSslPolicies.length === 1 ? "Policy" : "Policies"}):`);
+        if (b.wan.length > 0) polSummaryLines.push(`  • WAN / Full Access (dst: all): Policy [${b.wan.map((p) => p.id).join(", ")}]`);
+        if (b.rdp.length > 0) polSummaryLines.push(`  • Remote Desktop (RDP): ${b.rdp.length} policy (Policy [${b.rdp.map((p) => p.id).join(", ")}])`);
+        if (b.smb.length > 0) polSummaryLines.push(`  • File Shares (SMB): ${b.smb.length} policy (Policy [${b.smb.map((p) => p.id).join(", ")}])`);
+        if (b.mgmt.length > 0) polSummaryLines.push(`  • Management Access: Policy [${b.mgmt.map((p) => p.id).join(", ")}]`);
+        if (b.standard.length > 0) polSummaryLines.push(`  • Standard Services: ${b.standard.length} remaining policies`);
       }
 
-      const lines = [
-        "Foreign Country Access Configured via SSL-VPN:"
-      ];
-      if (highRiskCountryNames.length > 0) {
-        lines.push(`  • High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
-      }
-      if (additionalForeignCountryNames.length > 0) {
-        lines.push(`  • Additional Foreign Origins (${additionalForeignCountryNames.length}): ${additionalForeignCountryNames.join(", ")}`);
-      }
+      const bullets = [];
+      if (highRiskCountryNames.length > 0) bullets.push(`High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
+      if (additionalForeignCountryNames.length > 0) bullets.push(`Additional Foreign Origins (${additionalForeignCountryNames.length}): ${additionalForeignCountryNames.join(", ")}`);
       if (heuristicSuspectNames.length > 0) {
-        lines.push(`  • Heuristic Suspect Objects (${heuristicSuspectNames.length}): ${heuristicSuspectNames.join(", ")}`);
-        lines.push("    (Operational Review: Name pattern matched country heuristic. Verify if object represents internal subnet or intended foreign access.)");
+        bullets.push(`Heuristic Suspect Objects (${heuristicSuspectNames.length}): ${heuristicSuspectNames.join(", ")}`);
+        bullets.push("Operational Review: Name pattern matched country heuristic. Verify if object represents internal subnet or intended foreign access.");
       }
-      if (staticIpList.length > 0) {
-        lines.push(`  • Static Objects / IPs: ${staticIpList.join(", ")}`);
-      }
-      lines.push("");
-      lines.push(...polSummaryLines);
-      lines.push("  • SecOps Review: Audit foreign origins against client authorized travel list (Checklist Item 13).");
+      if (staticIpList.length > 0) bullets.push(`Static Objects / IPs: ${staticIpList.join(", ")}`);
+      bullets.push(...polSummaryLines);
+      bullets.push("SecOps Review: Audit foreign origins against client authorized travel list (Checklist Item 13).");
+
+      const findingText = buildSecVpn01ObservedState({
+        configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+        geoObjectsList,
+        allowedCountriesStr: allAllowedCountriesList.join(", "),
+        geoBypassRisk: "High",
+        riskAssessment: "Technical assessment: Foreign IP space authorized to establish SSL-VPN sessions to perimeter gateway listener.",
+        additionalBullets: bullets
+      });
 
       return makeFinding({
         id: "SEC-VPN-01",
@@ -5674,27 +6032,33 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
           highRiskCountries: highRiskCountryNames,
           additionalCountries: additionalForeignCountryNames,
           suspectHeuristics: heuristicSuspectNames,
-          domesticEntities,
+          domesticEntities: domesticEntities.map((d) => d.token),
           staticIps: staticIpList,
           buckets: b,
           activePoliciesCount: activeSslPolicies.length,
         },
-        findingText: lines.join("\n"),
-        actionText: `Review foreign country list against client authorized travel list. If ${allForeignCountryNames[0] || 'foreign access'} is obsolete or unauthorized, notify client immediately (Checklist ID 13) and remove them from source-address to mitigate brute-force and SSL-VPN exploit exposure.`,
+        findingText,
+        actionText: `Review foreign country list against client authorized travel list. If unauthorized, notify client immediately (Checklist ID 13) and remove them from source-address to mitigate brute-force and SSL-VPN exploit exposure.`,
         remediationCli: remCli,
       });
     }
 
-    // Case C: Strict Domestic Israel Geo-Fencing
-    const domesticListStr = domesticEntities.length ? [...new Set(domesticEntities)].join(", ") : "Israel";
-    const lines = [
-      "Strict Domestic Geo-Fencing:",
-      `  • Authorized Source Entities: ${domesticListStr}`
-    ];
+    // Case 7: Strictly Domestic Israel Baseline
+    const domesticListStr = domesticEntities.length ? [...new Set(domesticEntities.map((d) => d.token))].join(", ") : "Israel";
+    const bullets = [];
     if (staticIpList.length > 0) {
-      lines.push(`  • Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
+      bullets.push(`Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
     }
-    lines.push("  • Foreign Access: Zero foreign countries allowed (restricted strictly to domestic Israel baseline).");
+    bullets.push("Foreign Access: Zero foreign countries allowed (restricted strictly to domestic Israel baseline).");
+
+    const findingText = buildSecVpn01ObservedState({
+      configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+      geoObjectsList,
+      allowedCountriesStr: domesticGeoList.length ? domesticGeoList.join(", ") : "Israel (IL)",
+      geoBypassRisk: "None",
+      riskAssessment: "Technical assessment: Perimeter gateway listener strictly restricted to authorized domestic Israel geolocation.",
+      additionalBullets: bullets
+    });
 
     return makeFinding({
       id: "SEC-VPN-01",
@@ -5704,11 +6068,11 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       source: src,
       data: {
         vdom,
-        domesticEntities,
+        domesticEntities: domesticEntities.map((d) => d.token),
         domesticStr: domesticListStr,
         staticIps: staticIpList,
       },
-      findingText: lines.join("\n"),
+      findingText,
       actionText: "",
       remediationCli: "",
     });
@@ -6738,15 +7102,44 @@ function checkCisAuthTrustedHosts(tokenizer, text = "") {
  * Rule: Flag WARN if strong-crypto is disable/unset or ssl-min-proto-version is legacy (ssl3, tls1-0, tls1-1).
  * Flag PASS if strong-crypto is enable and minimum TLS version is >= TLSv1-2.
  */
+function extractSystemGlobalScope(text) {
+  if (!text) return "";
+
+  // 1. If Multi-VDOM with 'config global', extract inside 'config global ... end'
+  const multiVdomMatch = /(?:^|\n)\s*config\s+global\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(text);
+  const targetScope = multiVdomMatch ? multiVdomMatch[1] : text;
+
+  // 2. Extract 'config system global ... end' block
+  const confBlockMatch = /(?:^|\n)\s*config\s+system\s+global\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(targetScope);
+  if (confBlockMatch) {
+    return confBlockMatch[1];
+  }
+
+  // 3. Extract CLI output: 'get system global' or 'show [full-configuration] system global'
+  const cliBlockMatch = /(?:^|\n)[^\n#$]*[#$]\s*(?:get|show(?:\s+full-configuration)?)\s+system\s+global\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*end\b|$)/i.exec(text);
+  if (cliBlockMatch) {
+    return cliBlockMatch[1];
+  }
+
+  // Fallback: If 'get system global' appeared without prompt prefix
+  const getGlobalMatch = /(?:^|\n)\s*get\s+system\s+global\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*(?:get|show|diagnose|config)\s+|$)/i.exec(text);
+  if (getGlobalMatch) {
+    return getGlobalMatch[1];
+  }
+
+  return "";
+}
+
 function checkCisTlsStrongCrypto(tokenizer, text = "") {
   let strongCrypto = null;
   let sslMinVer = null;
+
+  const globalScopeText = extractSystemGlobalScope(text);
 
   if (tokenizer) {
     strongCrypto = cleanVal(
       tokenizer.getSystemGlobalProperty("strong-crypto") ||
       tokenizer.getProperty("system global", "strong-crypto", "global") ||
-      tokenizer.getProperty("system global", "strong-crypto", "root") ||
       tokenizer.getProperty("system global", "strong-crypto") || ""
     ) || null;
 
@@ -6755,25 +7148,26 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
       tokenizer.getSystemGlobalProperty("ssl-min-proto-ver") ||
       tokenizer.getProperty("system global", "ssl-min-proto-version", "global") ||
       tokenizer.getProperty("system global", "ssl-min-proto-ver", "global") ||
-      tokenizer.getProperty("system global", "ssl-min-proto-version", "root") ||
-      tokenizer.getProperty("system global", "ssl-min-proto-ver", "root") ||
       tokenizer.getProperty("system global", "ssl-min-proto-version") ||
       tokenizer.getProperty("system global", "ssl-min-proto-ver") || ""
     ) || null;
   }
 
-  if (strongCrypto === null && text) {
-    const m = /(?:set\s+)?strong-crypto\s*[:=\s]\s*(\S+)/i.exec(text);
-    if (m) strongCrypto = cleanVal(m[1]);
-  }
-  if (sslMinVer === null && text) {
-    const mVer = /(?:set\s+)?(?:ssl-min-proto-version|ssl-min-proto-ver)\s*[:=\s]\s*(\S+)/i.exec(text);
-    if (mVer) sslMinVer = cleanVal(mVer[1]);
+  // Fallback strictly within system global scope text (never scan outside system global)
+  if (globalScopeText) {
+    if (strongCrypto === null) {
+      const m = /(?:set\s+)?strong-crypto\s*[:=\s]\s*(\S+)/i.exec(globalScopeText);
+      if (m) strongCrypto = cleanVal(m[1]);
+    }
+    if (sslMinVer === null) {
+      const mVer = /(?:set\s+)?(?:ssl-min-proto-version|ssl-min-proto-ver)\s*[:=\s]\s*(\S+)/i.exec(globalScopeText);
+      if (mVer) sslMinVer = cleanVal(mVer[1]);
+    }
   }
 
   const hasGlobal = tokenizer
     ? (!!tokenizer.getSystemSection("system global") || !!tokenizer.getSection("system global"))
-    : /config\s+system\s+global/i.test(text);
+    : (globalScopeText.length > 0);
   const src = tokenizer ? "conf" : "cli";
   const remCli = "config system global\n    set strong-crypto enable\n    set ssl-min-proto-version TLSv1-2\nend";
 
@@ -6805,7 +7199,8 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
     effectiveTlsVer = "TLSv1-2";
   }
 
-  const isLegacyTls = !effectiveTlsVer || /^(ssl3|sslv3|tls1[-._]?0|tls1[-._]?1|tlsv1|tlsv1[-._]?[01])$/i.test(effectiveTlsVer);
+  const normTls = (effectiveTlsVer || "").toUpperCase().replace(/[._]/g, "-");
+  const isLegacyTls = !effectiveTlsVer || /^(SSL3|SSLV3|TLS1-0|TLS1-1|TLSV1|TLSV1-0|TLSV1-1)$/i.test(normTls);
 
   const strongCryptoDisplay = strongCrypto ? strongCrypto.toLowerCase() : "disable/unset";
   const tlsVerDisplay = sslMinVer
@@ -8614,6 +9009,8 @@ const CHEAT_SHEET_GROUPS = [
       "get router info ospf neighbor",
       "get system ha status",
       "get system global",
+      "get system global | grep -i strong-crypto",
+      "get system global | grep -i ssl-min",
       "get system ntp",
       "diagnose autoupdate status",
       "get vpn ipsec tunnel summary",
@@ -8622,7 +9019,7 @@ const CHEAT_SHEET_GROUPS = [
       "get system interface physical",
       "diagnose netlink interface list",
       "get vpn certificate local details",
-      "show system interface | grep -f allowaccess",
+      "show system interface | grep -i allowaccess",
       "show user local",
       "diagnose user ban list",
       "diagnose test application miglogd 6",
@@ -8639,7 +9036,9 @@ const CHEAT_SHEET_GROUPS = [
       { cmd: "get router info bgp summary", desc: "BGP neighbor peering states and prefix counts (FGT-RT-BGP-01)" },
       { cmd: "get router info ospf neighbor", desc: "OSPF neighbor adjacencies and state machine audit (FGT-RT-OSPF-01)" },
       { cmd: "get system ha status", desc: "HA Clustering health and cluster sync (FGT-HA-01)" },
-      { cmd: "get system global", desc: "Verify active admin timeout, lockout policy, and strong crypto runtime values (CIS-ADM-01/02, CIS-TLS-01)" },
+      { cmd: "get system global", desc: "Verify active admin timeout and lockout policy (CIS-ADM-01/02)" },
+      { cmd: "get system global | grep -i strong-crypto", desc: "Verify strong crypto runtime configuration (CIS-TLS-01)" },
+      { cmd: "get system global | grep -i ssl-min", desc: "Verify minimum TLS protocol version runtime configuration (CIS-TLS-01)" },
       { cmd: "get system ntp", desc: "Inspect live NTP daemon synchronization status and server reachability (CIS-SYS-02)" },
       { cmd: "diagnose autoupdate status", desc: "FortiGuard Sync connection and signature freshness (FGT-FG-01)" },
       { cmd: "get vpn ipsec tunnel summary", desc: "IPSec Tunnels selector status line-by-line (FGT-IPSEC-01)" },
@@ -8648,7 +9047,7 @@ const CHEAT_SHEET_GROUPS = [
       { cmd: "get system interface physical", desc: "Physical interface link status, speed, and duplex settings (FGT-NET-01)" },
       { cmd: "diagnose netlink interface list", desc: "Physical interface error rates, drops, and collision statistics (FGT-NET-02)" },
       { cmd: "get vpn certificate local details", desc: "Local SSL/VPN certificate validity and expiration dates (FGT-CERT-01)" },
-      { cmd: "show system interface | grep -f allowaccess", desc: "WAN Interface Access external exposure audit (SEC-INTF-01)" },
+      { cmd: "show system interface | grep -i allowaccess", desc: "WAN Interface Access external exposure audit (SEC-INTF-01)" },
       { cmd: "show user local", desc: "Local User MFA verification on password accounts (SEC-USER-01)" },
       { cmd: "diagnose user ban list", desc: "Banned IPs in quarantine ban table (FGT-BAN-01)" },
       { cmd: "diagnose test application miglogd 6", desc: "Log Delivery transmission counter to FAZ (FGT-LOG-01)" },
