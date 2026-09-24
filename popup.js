@@ -1540,21 +1540,74 @@ function checkFgtNetlinkErrorRatios(text) {
 /**
  * FGT-SYS-03: Daemon Crash Log History
  * Command: diagnose debug crashlog read
- * Buffer: Scan last 200 lines only.
- * FAIL: Crash of critical daemons (wad, ipsengine, miglogd, sslvpnd, iked) within last 24h, OR >= 3 crashes within 7 days.
- * WARN: Any daemon crash detected between 24h and 7 days ago.
- * PASS: Crash log is clean or no crashes within last 7 days.
+ * Buffer: Deep forensic extraction of ALL daemon crashes from the crashlog.
+ * FAIL: Any critical core daemon (wad, ipsengine, miglogd, sslvpnd, iked, httpsd, scanunit, forticron, authd) crashed in the last 24h, OR any single daemon crashed >= 3 times within 7 days.
+ * WARN: Any daemon crashed 1-2 times within the last 7 days.
+ * PASS: Clean log or no crashes in the last 7 days.
  */
 function checkFgtCrashlogHistory(text) {
   if (
-    !hasCommand(text, "diagnose debug crashlog read") &&
-    !/crashlog/i.test(text) &&
-    !/\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}.*?(?:application|signal)/i.test(text)
+    !text ||
+    (!hasCommand(text, "diagnose debug crashlog read") &&
+      !/crashlog/i.test(text) &&
+      !/\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}.*?(?:application|signal|crashed|previously\s+crashed|watchdog)/i.test(text))
   ) {
     return null;
   }
 
-  // 1. Extract specifically the section between 'diagnose debug crashlog read' and the next prompt/command
+  const CRITICAL_CORE_DAEMONS = new Set([
+    "wad",
+    "ipsengine",
+    "miglogd",
+    "sslvpnd",
+    "iked",
+    "httpsd",
+    "scanunit",
+    "forticron",
+    "authd"
+  ]);
+
+  const DAEMON_IMPACT_MAP = {
+    httpsd: "Administrative GUI loss",
+    sslvpnd: "SSL VPN Tunnel termination",
+    scanunit: "AV/DLP scanning halt",
+    wad: "Web proxy & explicit/transparent proxy worker crash",
+    ipsengine: "IPS Engine inspection failure & threat bypass risk",
+    miglogd: "Logging daemon failure & Syslog/FAZ reporting halt",
+    iked: "IPsec daemon crash & VPN tunnel collapse",
+    forticron: "Scheduled task scheduler crash",
+    authd: "Authentication daemon failure (LDAP/RADIUS)",
+    dnsproxy: "DNS proxy failure & resolution stoppage",
+    snmpd: "SNMP monitoring agent crash",
+    dhcpd: "DHCP service failure",
+    cw_acd: "Wireless controller AP management crash"
+  };
+
+  function formatSignalReason(sigNum, rawSigDesc = "") {
+    const num = parseInt(sigNum, 10);
+    if (num === 11) return "Signal 11 / Segfault";
+    if (num === 6) return "Signal 6 / Process Abort";
+    if (num === 10) return "Signal 10 / Bus Error";
+    if (num === 15) return "Signal 15 / Terminated";
+    if (num === 9) return "Signal 9 / Killed";
+    if (num === 4) return "Signal 4 / Illegal Instruction";
+    if (rawSigDesc && rawSigDesc.trim()) {
+      const cleanDesc = rawSigDesc.trim();
+      if (/segmentation/i.test(cleanDesc)) return "Signal 11 / Segfault";
+      if (/abort/i.test(cleanDesc)) return "Signal 6 / Process Abort";
+      if (/bus/i.test(cleanDesc)) return "Signal 10 / Bus Error";
+      return `Signal ${num} (${cleanDesc})`;
+    }
+    return `Signal ${num}`;
+  }
+
+  function parseCrashDate(dateStr) {
+    if (!dateStr) return null;
+    const d = new Date(dateStr.replace(" ", "T") + "Z");
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  // 1. Isolate the crashlog section if diagnostic command was run
   let logText = text;
   const cmdMatch = /(?:^|\n)\s*#?\s*diagnose\s+debug\s+crashlog\s+read\b/i.exec(text);
   if (cmdMatch) {
@@ -1565,7 +1618,7 @@ function checkFgtCrashlogHistory(text) {
     const lines = text.split(/\r?\n/);
     const crashIndices = [];
     for (let i = 0; i < lines.length; i++) {
-      if (/application|\b(?:signal\s+\d+|crashlog)\b/i.test(lines[i])) {
+      if (/application|\b(?:signal\s+\d+|crashlog|crashed\s+in|previously\s+crashed|watchdog\s+timeout)\b/i.test(lines[i])) {
         crashIndices.push(i);
       }
     }
@@ -1576,76 +1629,189 @@ function checkFgtCrashlogHistory(text) {
     }
   }
 
-  // Scan last 200 lines of the crashlog section
-  const lines = logText.split(/\r?\n/).slice(-200);
-  logText = lines.join("\n");
-
-  const crashes = [];
+  const daemons = new Map();
+  const seenSignatures = new Set();
   const now = Date.now();
 
-  // Pattern A: Single-line format: 2026-09-19 10:22:31, application wad, signal 11
-  const singleLineRe = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}),?\s*(?:<\d+>\s*)?application\s+(\S+),?\s*signal\s+(\d+)/gi;
-  let cm;
-  while ((cm = singleLineRe.exec(logText)) !== null) {
-    const dateStr = cm[1];
-    const app = cm[2].replace(/[,:]$/, "");
-    const signal = parseInt(cm[3], 10);
-    const crashDate = new Date(dateStr.replace(" ", "T") + "Z");
-    let hoursAgo = 999;
-    if (!isNaN(crashDate.getTime())) {
-      hoursAgo = Math.max(0, Math.floor((now - crashDate.getTime()) / (1000 * 60 * 60)));
+  function getOrCreateDaemon(appName) {
+    const norm = appName.toLowerCase().trim();
+    if (!daemons.has(norm)) {
+      daemons.set(norm, {
+        app: norm,
+        displayName: appName.trim(),
+        totalCrashes: 0,
+        latestTimestamp: "",
+        latestDate: null,
+        latestHoursAgo: 9999,
+        reasons: new Map(),
+        crashesLast24h: 0,
+        crashesLast7d: 0,
+        crashEvents: []
+      });
     }
-    crashes.push({ date: dateStr, app, signal, hoursAgo });
+    return daemons.get(norm);
   }
 
-  // Pattern B: Multiline FortiOS format:
-  // 2: 2026-09-19 10:22:31 <00123> application wad
-  // 3: 2026-09-19 10:22:31 *** signal 11 (Segmentation fault) received ***
-  const logLines = logText.split(/\r?\n/);
+  function recordDaemonCrash(appName, dateStr, reason, count = 1) {
+    if (!appName) return;
+    const cleanApp = appName.replace(/[,:<>]/g, "").trim();
+    if (!cleanApp) return;
+
+    const d = getOrCreateDaemon(cleanApp);
+    const crashDate = parseCrashDate(dateStr);
+    let hoursAgo = 0;
+    if (crashDate) {
+      hoursAgo = Math.max(0, Math.floor((now - crashDate.getTime()) / (1000 * 60 * 60)));
+    }
+
+    d.totalCrashes += count;
+    if (hoursAgo <= 24) {
+      d.crashesLast24h += count;
+    }
+    if (hoursAgo <= 168) {
+      d.crashesLast7d += count;
+    }
+
+    if (crashDate && (!d.latestDate || crashDate.getTime() > d.latestDate.getTime())) {
+      d.latestDate = crashDate;
+      d.latestTimestamp = dateStr;
+      d.latestHoursAgo = hoursAgo;
+    } else if (!d.latestTimestamp && dateStr) {
+      d.latestTimestamp = dateStr;
+      d.latestHoursAgo = hoursAgo;
+    }
+
+    if (reason) {
+      d.reasons.set(reason, (d.reasons.get(reason) || 0) + count);
+    }
+
+    d.crashEvents.push({ date: dateStr, reason, count, hoursAgo });
+  }
+
+  const rawLines = logText.split(/\r?\n/);
+
+  // Regex Patterns based on FortiOS Knowledge Base
+  const AGG_CRASH_RE = /^(?:\d+:\s+)?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+([a-zA-Z0-9_-]+)\s+previously\s+crashed\s+(\d+)\s+times(?:\.\s+The\s+(?:last|latest)\s+crash\s+was\s+at\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}))?/i;
+  const CRASHED_IN_RE = /^(?:\d+:\s+)?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+([a-zA-Z0-9_-]+)(?:\s+<\d+>|\s+\d+)?\s+crashed\s+in(?:\s+([a-zA-Z0-9_.-]+))?/i;
+  const WATCHDOG_RE = /^(?:\d+:\s+)?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+([a-zA-Z0-9_-]+)(?:\s+<\d+>|\s+\d+)?\s+watchdog\s+timeout/i;
+  const SINGLE_LINE_CRASH_RE = /^(?:\d+:\s+)?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}),?\s*(?:<\d+>\s*)?application\s+([a-zA-Z0-9_-]+),?\s*(?:\*\*\*\s*)?signal\s+(\d+)(?:\s*\(([^)]+)\))?/i;
+  const APP_LINE_RE = /^(?:\d+:\s+)?(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+(?:<\d+>\s+)?application\s+([a-zA-Z0-9_-]+)/i;
+  const SIG_LINE_RE = /^(?:\d+:\s+)?(?:(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+)?(?:<\d+>\s+)?(?:\*\*\*\s*)?signal\s+(\d+)(?:\s*\(([^)]+)\))?/i;
+
   let pendingApp = null;
   let pendingDate = null;
   let pendingLineIdx = -999;
 
-  for (let i = 0; i < logLines.length; i++) {
-    const line = logLines[i];
-    const appMatch = /(?:(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\s+)?(?:<\d+>\s+)?application\s+([a-zA-Z0-9_\-]+)/i.exec(line);
-    if (appMatch) {
-      let dStr = appMatch[1];
-      if (!dStr) {
-        const dMatch = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/.exec(line);
-        if (dMatch) dStr = dMatch[1];
+  for (let i = 0; i < rawLines.length; i++) {
+    const line = rawLines[i].trim();
+    if (!line) continue;
+
+    // Pattern 1: Aggregated crashes (e.g. httpsd previously crashed 14 times)
+    const aggMatch = AGG_CRASH_RE.exec(line);
+    if (aggMatch) {
+      const date = aggMatch[1];
+      const app = aggMatch[2];
+      const count = parseInt(aggMatch[3], 10);
+      const lastDate = aggMatch[4] || date;
+      const sigKey = `agg_${app}_${count}_${lastDate}`;
+      if (!seenSignatures.has(sigKey)) {
+        seenSignatures.add(sigKey);
+        recordDaemonCrash(app, lastDate, null, count);
       }
-      pendingApp = appMatch[2];
-      pendingDate = dStr;
-      pendingLineIdx = i;
+      continue;
     }
 
-    const sigMatch = /(?:\*\*\*\s*)?signal\s+(\d+)/i.exec(line);
-    if (sigMatch) {
-      const signal = parseInt(sigMatch[1], 10);
-      let dateStr = pendingDate;
-      const dMatch = /(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})/.exec(line);
-      if (dMatch) dateStr = dMatch[1];
+    // Pattern 2: Module-Specific Aborts (e.g. scanunit 29396 crashed in scanunit)
+    const abortMatch = CRASHED_IN_RE.exec(line);
+    if (abortMatch) {
+      const date = abortMatch[1];
+      const app = abortMatch[2];
+      const sigKey = `abort_${app}_${date}`;
+      if (!seenSignatures.has(sigKey)) {
+        seenSignatures.add(sigKey);
+        recordDaemonCrash(app, date, "Process Abort", 1);
+      }
+      continue;
+    }
 
-      const app = (pendingApp && (i - pendingLineIdx <= 5)) ? pendingApp : "unknown";
+    // Pattern 3: Watchdog Timeout (e.g. ipsengine watchdog timeout)
+    const wdMatch = WATCHDOG_RE.exec(line);
+    if (wdMatch) {
+      const date = wdMatch[1];
+      const app = wdMatch[2];
+      const sigKey = `wd_${app}_${date}`;
+      if (!seenSignatures.has(sigKey)) {
+        seenSignatures.add(sigKey);
+        recordDaemonCrash(app, date, "Watchdog Timeout", 1);
+      }
+      continue;
+    }
 
-      if (dateStr && app) {
-        const exists = crashes.some(c => c.date === dateStr && c.signal === signal && (c.app === app || c.app === "unknown"));
-        if (!exists) {
-          const crashDate = new Date(dateStr.replace(" ", "T") + "Z");
-          let hoursAgo = 999;
-          if (!isNaN(crashDate.getTime())) {
-            hoursAgo = Math.max(0, Math.floor((now - crashDate.getTime()) / (1000 * 60 * 60)));
-          }
-          crashes.push({ date: dateStr, app, signal, hoursAgo });
+    // Pattern 4: Single-Line Application Crash
+    const singleMatch = SINGLE_LINE_CRASH_RE.exec(line);
+    if (singleMatch) {
+      const date = singleMatch[1];
+      const app = singleMatch[2];
+      const sigNum = singleMatch[3];
+      const sigDesc = singleMatch[4] || "";
+      const reason = formatSignalReason(sigNum, sigDesc);
+      const sigKey = `single_${app}_${date}_${sigNum}`;
+      if (!seenSignatures.has(sigKey)) {
+        seenSignatures.add(sigKey);
+        recordDaemonCrash(app, date, reason, 1);
+      }
+      continue;
+    }
+
+    // Pattern 5: Multi-Line Standard Crash Context Merging
+    // Line 1: application <app>
+    const appMatch = APP_LINE_RE.exec(line);
+    if (appMatch) {
+      if (pendingApp && (i - pendingLineIdx <= 5)) {
+        const prevKey = `pending_${pendingApp}_${pendingDate}`;
+        if (!seenSignatures.has(prevKey)) {
+          seenSignatures.add(prevKey);
+          recordDaemonCrash(pendingApp, pendingDate, "Process Crash", 1);
         }
+      }
+      pendingDate = appMatch[1];
+      pendingApp = appMatch[2];
+      pendingLineIdx = i;
+      continue;
+    }
+
+    // Line 2: signal <sigNum>
+    const sigMatch = SIG_LINE_RE.exec(line);
+    if (sigMatch && (sigMatch[2] !== undefined)) {
+      const sigDate = sigMatch[1] || pendingDate;
+      const sigNum = sigMatch[2];
+      const sigDesc = sigMatch[3] || "";
+      const reason = formatSignalReason(sigNum, sigDesc);
+      const app = (pendingApp && (i - pendingLineIdx <= 5)) ? pendingApp : "system";
+      const sigKey = `multi_${app}_${sigDate}_${sigNum}`;
+      if (!seenSignatures.has(sigKey)) {
+        seenSignatures.add(sigKey);
+        recordDaemonCrash(app, sigDate, reason, 1);
       }
       pendingApp = null;
       pendingDate = null;
+      pendingLineIdx = -999;
+      continue;
     }
   }
 
-  if (crashes.length === 0) {
+  // Flush any dangling pendingApp at end of log
+  if (pendingApp) {
+    const prevKey = `pending_${pendingApp}_${pendingDate}`;
+    if (!seenSignatures.has(prevKey)) {
+      seenSignatures.add(prevKey);
+      recordDaemonCrash(pendingApp, pendingDate, "Process Crash", 1);
+    }
+  }
+
+  const daemonEntries = Array.from(daemons.values());
+
+  if (daemonEntries.length === 0) {
     return makeFinding({
       id: "FGT-SYS-03",
       component: "Daemon Crash Log History",
@@ -1657,53 +1823,86 @@ function checkFgtCrashlogHistory(text) {
     });
   }
 
-  const data = { crashes };
-
-  const CRITICAL_DAEMONS = new Set(["wad", "ipsengine", "miglogd", "sslvpnd", "iked"]);
-  const criticalCrashes24h = crashes.filter(c => CRITICAL_DAEMONS.has(c.app.toLowerCase()) && c.hoursAgo <= 24);
-  const recentCrashes7d = crashes.filter(c => c.hoursAgo <= 168);
-  const crashes24hTo7d = crashes.filter(c => c.hoursAgo > 24 && c.hoursAgo <= 168);
-
-  if (criticalCrashes24h.length > 0 || recentCrashes7d.length >= 3) {
-    let reason = "";
-    if (criticalCrashes24h.length > 0) {
-      reason = `Critical system daemon crash detected within last 24 hours: ${criticalCrashes24h.map(c => `${c.app} (signal ${c.signal} at ${c.date})`).join("; ")}.`;
-    } else {
-      reason = `${recentCrashes7d.length} daemon crashes recorded within last 7 days. High process instability detected.`;
+  // Determine Primary Reason & Impact for each daemon
+  for (const d of daemonEntries) {
+    let bestReason = "Process Crash";
+    let maxReasonCount = 0;
+    for (const [r, count] of d.reasons.entries()) {
+      if (count > maxReasonCount) {
+        maxReasonCount = count;
+        bestReason = r;
+      }
     }
+    d.primaryReason = bestReason;
+    d.impact = DAEMON_IMPACT_MAP[d.app.toLowerCase()] || "";
+  }
 
+  // Severity Logic
+  const hasCritical24h = daemonEntries.some(
+    d => CRITICAL_CORE_DAEMONS.has(d.app.toLowerCase()) && d.crashesLast24h > 0
+  );
+  const hasRepeated7d = daemonEntries.some(d => d.crashesLast7d >= 3);
+  const hasAny7d = daemonEntries.some(d => d.crashesLast7d > 0);
+
+  let status = "PASS";
+  if (hasCritical24h || hasRepeated7d) {
+    status = "FAIL";
+  } else if (hasAny7d) {
+    status = "WARN";
+  } else {
+    status = "PASS";
+  }
+
+  if (status === "PASS") {
     return makeFinding({
       id: "FGT-SYS-03",
       component: "Daemon Crash Log History",
-      status: "FAIL",
-      findingText: `Daemon process instability critical: ${reason}`,
-      actionText: "Inspect crash log details ('diagnose debug crashlog read'), open a support ticket with Fortinet TAC, and verify if firmware update is recommended for known daemon memory leaks.",
+      status: "PASS",
+      findingText: "Crash log is clean: no daemon crash events recorded in the last 7 days.",
+      actionText: "",
       source: "cli",
-      data
+      data: { crashes: daemonEntries }
     });
   }
 
-  if (crashes24hTo7d.length > 0) {
-    const detail = crashes24hTo7d.map(c => `${c.app} (signal ${c.signal} at ${c.date})`).join("; ");
-    return makeFinding({
-      id: "FGT-SYS-03",
-      component: "Daemon Crash Log History",
-      status: "WARN",
-      findingText: `Daemon crash event(s) recorded within last 7 days: ${detail}.`,
-      actionText: "Monitor process stability over upcoming operational cycles.",
-      source: "cli",
-      data
-    });
+  // Sort daemons by most recent date (descending), then by highest total crashes (descending)
+  daemonEntries.sort((a, b) => {
+    const timeA = a.latestDate ? a.latestDate.getTime() : 0;
+    const timeB = b.latestDate ? b.latestDate.getTime() : 0;
+    if (timeB !== timeA) return timeB - timeA;
+    return b.totalCrashes - a.totalCrashes;
+  });
+
+  const bulletLines = daemonEntries.map(
+    d => `  • [${d.app}] crashed ${d.totalCrashes} times (${d.primaryReason}) - Latest: ${d.latestTimestamp}`
+  );
+
+  const lines = [
+    "Daemon process instability detected. The following crashes were recorded:",
+    ...bulletLines
+  ];
+
+  const impactedDaemons = daemonEntries.filter(d => d.impact);
+  if (impactedDaemons.length > 0) {
+    lines.push("");
+    lines.push("Impact Analysis:");
+    for (const d of impactedDaemons) {
+      lines.push(`  • ${d.app}: ${d.impact}`);
+    }
   }
+
+  const findingText = lines.join("\n");
 
   return makeFinding({
     id: "FGT-SYS-03",
     component: "Daemon Crash Log History",
-    status: "PASS",
-    findingText: "Crash log is clean: no daemon crash events recorded in the last 7 days.",
-    actionText: "",
+    status,
+    findingText,
+    actionText: status === "FAIL"
+      ? "Inspect crash log details ('diagnose debug crashlog read'), open a high-priority ticket with Fortinet TAC, and verify if a firmware update or memory leak patch is required for the unstable daemon(s)."
+      : "Monitor process stability over upcoming operational cycles and open a support ticket if crash frequency increases.",
     source: "cli",
-    data
+    data: { crashes: daemonEntries }
   });
 }
 
@@ -7134,8 +7333,7 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
   let strongCrypto = null;
   let sslMinVer = null;
 
-  const globalScopeText = extractSystemGlobalScope(text);
-
+  // 1. Evaluate Static Config (AST / Tokenizer)
   if (tokenizer) {
     strongCrypto = cleanVal(
       tokenizer.getSystemGlobalProperty("strong-crypto") ||
@@ -7153,21 +7351,39 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
     ) || null;
   }
 
-  // Fallback strictly within system global scope text (never scan outside system global)
-  if (globalScopeText) {
-    if (strongCrypto === null) {
-      const m = /(?:set\s+)?strong-crypto\s*[:=\s]\s*(\S+)/i.exec(globalScopeText);
-      if (m) strongCrypto = cleanVal(m[1]);
+  // 2. Evaluate Runtime CLI Log & Text Fallback
+  // Live CLI output takes precedence over static backup defaults
+  if (text) {
+    // Line-anchored match for strong-crypto: matches "strong-crypto : enable" or "set strong-crypto enable"
+    // Strictly anchored to line start to avoid matching the grep command itself
+    const scMatch = /(?:^|\r?\n)\s*(?:set\s+)?strong-crypto\s*[:= ]\s*([a-zA-Z0-9_-]+)/i.exec(text);
+    if (scMatch) {
+      const detectedVal = cleanVal(scMatch[1]).toLowerCase();
+      if (detectedVal === "enable" || detectedVal === "disable") {
+        strongCrypto = detectedVal;
+      }
     }
-    if (sslMinVer === null) {
-      const mVer = /(?:set\s+)?(?:ssl-min-proto-version|ssl-min-proto-ver)\s*[:=\s]\s*(\S+)/i.exec(globalScopeText);
-      if (mVer) sslMinVer = cleanVal(mVer[1]);
+
+    // Scoped extraction for ssl-min-proto-version in system global to prevent catching it from vpn ssl
+    const globalScopeText = extractSystemGlobalScope(text);
+    const searchScope = globalScopeText || text;
+
+    if (!sslMinVer) {
+      const cliVerMatch = /(?:^|\r?\n)\s*ssl-min-proto-version\s*[:= ]\s*([a-zA-Z0-9_.-]+)/i.exec(searchScope);
+      if (cliVerMatch) {
+        sslMinVer = cleanVal(cliVerMatch[1]);
+      } else if (globalScopeText) {
+        const confVerMatch = /(?:^|\r?\n)\s*set\s+(?:ssl-min-proto-version|ssl-min-proto-ver)\s+([a-zA-Z0-9_.-]+)/i.exec(globalScopeText);
+        if (confVerMatch) {
+          sslMinVer = cleanVal(confVerMatch[1]);
+        }
+      }
     }
   }
 
   const hasGlobal = tokenizer
     ? (!!tokenizer.getSystemSection("system global") || !!tokenizer.getSection("system global"))
-    : (globalScopeText.length > 0);
+    : (/(?:system\s+global|strong-crypto|ssl-min)/i.test(text));
   const src = tokenizer ? "conf" : "cli";
   const remCli = "config system global\n    set strong-crypto enable\n    set ssl-min-proto-version TLSv1-2\nend";
 
