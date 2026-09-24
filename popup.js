@@ -2038,63 +2038,97 @@ function checkFgtFortiGuardSync(text) {
 }
 
 /**
- * FGT-IPSEC-01: FortiGate IPSec Tunnels
- * Triggers: get vpn ipsec tunnel summary
- * REGEX REQUIREMENT: Parse line-by-line (/m flag). Strictly match lines starting with:
- * ^'([^']+)'\s+([\d\.:]+)\s+selectors\(total,up\):\s*(\d+)\/(\d+)
- * FAIL: If any tunnel has up == 0 or up < total. Specify the down tunnel name and selectors.
- * PASS: All tunnels have selectors up == total.
+ * FGT-IPSEC-01: FortiGate IPSec Tunnels (Advanced Phase 2 Inspection)
+ * Commands: get vpn ipsec tunnel summary & diagnose vpn tunnel list
  */
 function checkFgtIpsecTunnels(text) {
-  if (!hasCommand(text, "get vpn ipsec tunnel summary") && !/selectors\(total,up\):/i.test(text)) {
+  const hasSummary = hasCommand(text, "get vpn ipsec tunnel summary") || /selectors\(total,up\):/i.test(text);
+  const hasList = hasCommand(text, "diagnose vpn tunnel list") || /proxyid=/i.test(text);
+
+  if (!hasSummary && !hasList) {
     return null;
   }
 
-  const tunnelRe = /^'([^']+)'\s+([\d\.:]+)\s+selectors\(total,up\):\s*(\d+)\/(\d+)/gm;
-  const tunnels = [];
-  let m;
+  const tunnelsMap = new Map();
 
-  while ((m = tunnelRe.exec(text)) !== null) {
-    tunnels.push({
-      name: m[1],
-      peer: m[2],
-      total: parseInt(m[3], 10),
-      up: parseInt(m[4], 10),
-    });
+  // 1. Parse Summary (Total vs Up)
+  if (hasSummary) {
+    const tunnelRe = /^'([^']+)'\s+([\d\.:]+)\s+selectors\(total,up\):\s*(\d+)\/(\d+)/gm;
+    let m;
+    while ((m = tunnelRe.exec(text)) !== null) {
+      tunnelsMap.set(m[1], {
+        name: m[1],
+        peer: m[2],
+        total: parseInt(m[3], 10),
+        up: parseInt(m[4], 10),
+        deadSelectors: []
+      });
+    }
   }
 
-  if (!tunnels.length) return null;
+  // 2. Parse Detailed Tunnel List (sa=0 Dead Selectors)
+  if (hasList) {
+    const proxyRe = /proxyid=([^\s]+)[^\n]*?sa=0[^\n]*\r?\n\s*src:\s*([^\r\n]+)\r?\n\s*dst:\s*([^\r\n]+)/gi;
+    let pm;
+    while ((pm = proxyRe.exec(text)) !== null) {
+      const tName = pm[1];
+      // Cleanup "0:192.168.10.0/255.255.255.0:0" -> "192.168.10.0/255.255.255.0"
+      const src = pm[2].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
+      const dst = pm[3].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
 
-  const degraded = tunnels.filter((t) => t.up === 0 || t.up < t.total);
+      if (tunnelsMap.has(tName)) {
+        tunnelsMap.get(tName).deadSelectors.push(`Local: ${src} -> Remote: ${dst}`);
+      } else {
+        // Found dead selector but no summary info (partial log snippet)
+        tunnelsMap.set(tName, {
+          name: tName,
+          peer: "Unknown",
+          total: 1,
+          up: 0,
+          deadSelectors: [`Local: ${src} -> Remote: ${dst}`]
+        });
+      }
+    }
+  }
+
+  if (tunnelsMap.size === 0) return null;
+
+  const tunnels = Array.from(tunnelsMap.values());
+  const degraded = tunnels.filter(t => t.up === 0 || t.up < t.total || t.deadSelectors.length > 0);
 
   if (degraded.length) {
-    const details = degraded
-      .map((t) => `'${t.name}' (Peer: ${t.peer}, Selectors: ${t.up}/${t.total} up)`)
-      .join(", ");
-    const data = { tunnels: details, count: tunnels.length, degradedCount: degraded.length };
+    const bullets = degraded.map(t => {
+      let line = `  • Tunnel '${t.name}' (Peer: ${t.peer}) - Selectors: ${t.up}/${t.total} UP`;
+      if (t.deadSelectors.length > 0) {
+        line += `\n    - Dead Selectors Identified:\n` + t.deadSelectors.map(s => `      > ${s} (sa=0)`).join("\n");
+      }
+      return line;
+    }).join("\n");
+
+    const firstName = degraded[0].name;
 
     return makeFinding({
       id: "FGT-IPSEC-01",
       component: "FortiGate IPSec Tunnels",
       status: "FAIL",
-      findingText: `IPSec tunnel degradation: ${degraded.length} of ${tunnels.length} tunnel(s) not fully up: ${details}.`,
-      actionText: "Verify Phase 1/Phase 2 state ('diagnose vpn ike gateway list', 'diagnose vpn tunnel list') and inspect remote peer reachability / WAN uplink.",
+      findingText: `IPSec tunnel degradation detected: ${degraded.length} of ${tunnels.length} tunnel(s) experiencing Phase 2 failures:\n${bullets}`,
+      actionText: "Verify Phase 2 subnet parameters and NAT-T matching. To forcefully re-negotiate stuck IPsec selectors, clear the specific IKE gateway and flush the tunnel cache as per Fortinet KB.",
+      remediationCli: `diagnose vpn ike gateway clear name ${firstName}\ndiagnose vpn tunnel flush ${firstName}`,
       source: "cli",
-      data
+      data: { degradedCount: degraded.length }
     });
   }
 
-  const allNames = tunnels.map((t) => t.name).join(", ");
-  const data = { tunnels: allNames, count: tunnels.length, degradedCount: 0 };
-
+  const allNames = tunnels.map(t => t.name).join(", ");
   return makeFinding({
     id: "FGT-IPSEC-01",
     component: "FortiGate IPSec Tunnels",
     status: "PASS",
-    findingText: `All ${tunnels.length} IPSec VPN tunnel(s) are fully UP with all selectors active (${allNames}).`,
+    findingText: `All ${tunnels.length} IPSec VPN tunnel(s) are fully UP with all Phase 2 selectors active (${allNames}).`,
     actionText: "",
+    remediationCli: "",
     source: "cli",
-    data
+    data: { degradedCount: 0 }
   });
 }
 
