@@ -9,13 +9,15 @@
 <body class="bg-surface text-on-surface antialiased">
   <div class="app-container">
 
-    <!-- 1. HEADER BAR -->
+    <!-- 1. HEADER BAR (36px high) -->
     <header class="header-bar">
+      <!-- Left: Identity & Operational State -->
       <div class="header-brand">
         <span class="indicator-dot" aria-hidden="true"></span>
         <span class="header-title">FortiOS Security Auditor</span>
         <span class="version-badge">v1.0.0</span>
       </div>
+      <!-- Right: Audit Mode Badge -->
       <div class="header-controls">
         <span class="findings-badge" id="auditModeBadge">53 Controls (Full Audit)</span>
         <span id="detectBadge" class="sr-only" data-kind="none">No input</span>
@@ -23,22 +25,20 @@
       </div>
     </header>
 
-    <!-- 2. MAIN TABS -->
+    <!-- Main Navigation Tabs -->
     <nav class="main-tabs" role="tablist">
-      <button type="button" id="tabBtnAnalyzer" class="main-tab-btn is-active" role="tab" aria-selected="true">
-        <span id="tabLabelAnalyzer">Security Audit & Inspector</span>
+      <button type="button" class="main-tab-btn is-active" id="tabBtnAnalyzer" role="tab" aria-selected="true" aria-controls="viewAnalyzer">
+        <span id="tabLabelAnalyzer">Security Audit &amp; Inspector</span>
       </button>
-      <button type="button" id="tabBtnCheatsheet" class="main-tab-btn" role="tab" aria-selected="false">
+      <button type="button" class="main-tab-btn" id="tabBtnCheatsheet" role="tab" aria-selected="false" aria-controls="viewCheatsheet">
         <span id="tabLabelCheatsheet">Diagnostic CLI Cheat Sheet</span>
       </button>
     </nav>
 
-    <!-- ========================================== -->
-    <!-- VIEW: ANALYZER                             -->
-    <!-- ========================================== -->
-    <div id="viewAnalyzer" class="view-container">
-      
-      <!-- STAGING BAR -->
+    <!-- Main Analyzer View -->
+    <main id="viewAnalyzer" class="view-container">
+
+      <!-- 2. FILE STAGING BAR (Single Row, Max 60px) -->
       <section class="staging-section">
         <div id="dropZone" class="dropzone-box" tabindex="0" role="button" aria-label="Drop .log/.conf files or browse">
           <input type="file" id="fileInput" class="file-input-hidden" multiple accept=".txt,.log,.conf,.cfg" />
@@ -48,8 +48,11 @@
               <svg class="staging-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
                 <path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd" />
               </svg>
-              <span id="dropzonePrimary" class="prompt-text">Drop .log/.conf files or <span class="browse-link">browse</span></span>
+              <span class="prompt-text">Drop .log/.conf files or</span>
+              <button type="button" id="browseBtn" class="browse-link">browse</button>
             </div>
+
+            <!-- File Chips Container (Dynamic) -->
             <div id="fileChipsWrapper" class="file-chips-wrapper"></div>
           </div>
 
@@ -57,15 +60,22 @@
             <svg class="verified-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
               <path fill-rule="evenodd" d="M6.267 3.455a3.066 3.066 0 001.745-.723 3.066 3.066 0 013.976 0 3.066 3.066 0 001.745.723 3.066 3.066 0 012.812 2.812c.051.643.304 1.254.723 1.745a3.066 3.066 0 010 3.976 3.066 3.066 0 00-.723 1.745 3.066 3.066 0 01-2.812 2.812 3.066 3.066 0 00-1.745.723 3.066 3.066 0 01-3.976 0 3.066 3.066 0 00-1.745-.723 3.066 3.066 0 01-2.812-2.812 3.066 3.066 0 00-.723-1.745 3.066 3.066 0 010-3.976 3.066 3.066 0 00.723-1.745 3.066 3.066 0 012.812-2.812zm7.44 5.252a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd" />
             </svg>
-            <span id="verifiedText" class="verified-text" title="Local Client-Side Only">Local Client-Side Only</span>
+            <span id="verifiedText" class="verified-text" title="All configuration and CLI telemetry is parsed strictly within your local browser sandbox. Zero data exfiltration.">Local Client-Side Only</span>
           </div>
         </div>
 
-        <div id="fileListContainer" class="is-hidden" style="display:none;"><span id="fileListCount"></span><button id="clearAllFilesBtn"></button></div>
-        <div id="dropzoneSub" style="display:none;"></div>
+        <!-- Hidden compatibility wrappers -->
+        <div id="fileListContainer" class="is-hidden" style="display:none;">
+          <span id="fileListCount"></span>
+          <button type="button" id="clearAllFilesBtn"></button>
+        </div>
+        <div id="dropzonePrompt" style="display:none;">
+          <span id="dropzonePrimary"></span>
+          <span id="dropzoneSub"></span>
+        </div>
       </section>
 
-      <!-- TERMINAL DRAWER -->
+      <!-- Collapsible Direct Terminal Input -->
       <div class="terminal-drawer">
         <button type="button" id="pasteToggleBtn" class="terminal-toggle" aria-expanded="false" aria-controls="pasteBody">
           <div class="terminal-toggle-title">
@@ -81,8 +91,9 @@
         </div>
       </div>
 
-      <!-- ACTION BAR -->
+      <!-- 3. ACTION & OUTPUT CONTROL BAR -->
       <section class="action-bar">
+        <!-- Left: Execute Action & Summary -->
         <div class="action-bar-left">
           <button type="button" id="analyzeBtn" class="btn-analyze">
             <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
@@ -95,10 +106,11 @@
           </button>
           <div class="summary-indicator">
             <span class="status-dot" aria-hidden="true"></span>
-            <span id="summaryCountText">0 files parsed · 0 checks</span>
+            <span id="summaryCountText">0 files parsed · 0 checks evaluated</span>
           </div>
         </div>
 
+        <!-- Right: View Mode Toggle & Quick Exports -->
         <div class="action-bar-right">
           <div class="view-toggle-group" role="tablist">
             <button type="button" id="tab-btn-html" class="view-toggle-btn is-active" role="tab" aria-selected="true">HTML Report</button>
@@ -129,102 +141,101 @@
         </div>
       </section>
 
-      <!-- HTML WORKSPACE -->
-      <div id="view-html" class="workspace-view">
-        <div class="metrics-subbar">
-          <div class="metrics-chips">
-            <div class="metric-chip chip-pass">
-              <span class="chip-dot" aria-hidden="true"></span>
-              <span id="labelPass" class="chip-label">PASS</span>
-              <span id="countPass" class="chip-count">0</span>
+      <!-- 4. DUAL WORKSPACE AREA -->
+      <div class="workspace-area">
+        <!-- HTML Workspace -->
+        <div id="view-html" class="workspace-view">
+          <!-- Sub-bar: Status Metrics & Filter -->
+          <div class="metrics-subbar">
+            <div class="metrics-chips">
+              <div class="metric-chip chip-pass">
+                <span class="chip-dot" aria-hidden="true"></span>
+                <span id="labelPass" class="chip-label">PASS</span>
+                <span id="countPass" class="chip-count">0</span>
+              </div>
+              <div class="metric-chip chip-warn">
+                <span class="chip-dot" aria-hidden="true"></span>
+                <span id="labelWarn" class="chip-label">WARN</span>
+                <span id="countWarn" class="chip-count">0</span>
+              </div>
+              <div class="metric-chip chip-fail">
+                <span class="chip-dot" aria-hidden="true"></span>
+                <span id="labelFail" class="chip-label">FAIL</span>
+                <span id="countFail" class="chip-count">0</span>
+              </div>
+              <div id="pillCisScore" class="metric-chip chip-cis is-hidden">
+                <span class="chip-dot" aria-hidden="true"></span>
+                <span id="labelCisScore" class="chip-label">CIS Score</span>
+                <span id="countCisScore" class="chip-count">0%</span>
+              </div>
             </div>
-            <div class="metric-chip chip-warn">
-              <span class="chip-dot" aria-hidden="true"></span>
-              <span id="labelWarn" class="chip-label">WARN</span>
-              <span id="countWarn" class="chip-count">0</span>
-            </div>
-            <div class="metric-chip chip-fail">
-              <span class="chip-dot" aria-hidden="true"></span>
-              <span id="labelFail" class="chip-label">FAIL</span>
-              <span id="countFail" class="chip-count">0</span>
-            </div>
-            <div id="pillCisScore" class="metric-chip chip-cis is-hidden">
-              <span class="chip-dot" aria-hidden="true"></span>
-              <span id="labelCisScore" class="chip-label">CIS Score</span>
-              <span id="countCisScore" class="chip-count">0%</span>
+            <div class="metrics-filter">
+              <label class="filter-label" title="Filter to show only security issues (FAIL and WARN)">
+                <input type="checkbox" id="filterIssuesOnly" class="filter-checkbox" />
+                <span id="filterIssuesText">Issues Only (FAIL &amp; WARN)</span>
+              </label>
+              <span id="findingsCountBadge" class="findings-badge">0 items</span>
             </div>
           </div>
-          <div class="metrics-filter">
-            <label class="filter-label" title="Filter to show only security issues (FAIL and WARN)">
-              <input type="checkbox" id="filterIssuesOnly" class="filter-checkbox" />
-              <span id="filterIssuesText">Issues Only (FAIL &amp; WARN)</span>
-            </label>
-            <span id="findingsCountBadge" class="findings-badge">0 items</span>
+
+          <!-- Dense Table / Finding Cards -->
+          <div class="table-container">
+            <h2 id="resultsHeading" class="sr-only">Findings &amp; Security Audit</h2>
+            <table id="resultsTable" class="dense-table">
+              <thead>
+                <tr>
+                  <th id="thCheckId" class="col-id">Control ID</th>
+                  <th id="thComponent" class="col-comp">Component</th>
+                  <th id="thStatus" class="col-status">Status</th>
+                  <th id="thFindings" class="col-findings">Audit Findings &amp; Security Action</th>
+                </tr>
+              </thead>
+              <tbody id="resultsBody">
+                <tr class="empty-row">
+                  <td colspan="4">
+                    <div class="empty-state">
+                      <p class="empty-title" id="emptyTitle">Ready for Security &amp; Hardening Audit</p>
+                      <p class="empty-desc" id="emptyDesc">Drop FortiOS configuration backups (.conf/.cfg) or diagnostic CLI logs (.txt/.log) above, then click <strong>Analyze Security</strong>.</p>
+                    </div>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
-        <div class="table-container">
-          <table id="resultsTable" class="dense-table">
-            <thead>
-              <tr>
-                <th id="thCheckId" class="col-id">Control ID</th>
-                <th id="thComponent" class="col-comp">Component</th>
-                <th id="thStatus" class="col-status">Status</th>
-                <th id="thFindings" class="col-findings">Audit Findings &amp; Security Action</th>
-              </tr>
-            </thead>
-            <tbody id="resultsBody">
-              <tr class="empty-row">
-                <td colspan="4">
-                  <div class="empty-state">
-                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                      <path stroke-linecap="round" stroke-linejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    <p class="empty-title" id="emptyTitle">Ready for Security &amp; Hardening Audit</p>
-                    <p class="empty-desc" id="emptyDesc">Drop FortiOS configuration backups (.conf/.cfg) or diagnostic CLI logs (.txt/.log) above, then click <strong>Analyze Security</strong>.</p>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <!-- Plain Text Workspace (hidden by default) -->
+        <div id="view-plain" class="workspace-view is-hidden">
+          <div class="plain-text-header">
+            <div class="plain-text-title-group">
+              <span class="plain-text-title">Clean Monospace Security Report</span>
+              <span class="plain-text-hint">(Clean ASCII · Zero raw markdown syntax)</span>
+            </div>
+            <button type="button" id="btn-copy-clickup" class="btn-copy-clickup">
+              <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
+                <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 2H9a3 3 0 01-3-2z" />
+              </svg>
+              <span>Copy Text Report</span>
+            </button>
+          </div>
+          <div class="plain-text-container">
+            <pre id="plainTextOutput" class="plain-text-box"><code id="clickup-text-payload">No analysis executed yet. Run Analyze Security to generate report.</code></pre>
+          </div>
         </div>
       </div>
+    </main>
 
-      <!-- PLAIN TEXT WORKSPACE -->
-      <div id="view-plain" class="workspace-view is-hidden">
-        <div class="plain-text-header">
-          <div class="plain-text-title-group">
-            <span class="plain-text-title">Clean Monospace Security Report</span>
-            <span class="plain-text-hint">(Clean ASCII · Zero raw markdown syntax)</span>
-          </div>
-          <button type="button" id="btn-copy-clickup" class="btn-copy-clickup">
-            <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
-              <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 2H9a3 3 0 01-3-2z" />
-            </svg>
-            <span>Copy Text Report</span>
-          </button>
-        </div>
-        <div class="plain-text-container">
-          <pre id="plainTextOutput" class="plain-text-box"><code id="clickup-text-payload">No analysis executed yet. Run Analyze Security to generate report.</code></pre>
-        </div>
-      </div>
-    </div>
-
-    <!-- ========================================== -->
-    <!-- VIEW: CHEAT SHEET                          -->
-    <!-- ========================================== -->
-    <div id="viewCheatsheet" class="view-container is-hidden" style="overflow-y: auto;">
+    <!-- 5. CHEAT SHEET VIEW -->
+    <div id="viewCheatsheet" class="view-container is-hidden" role="tabpanel" aria-labelledby="tabBtnCheatsheet" style="overflow-y: auto;">
       <div class="cheatsheet-header">
-        <h2 id="cheatsheetTitle" class="cheatsheet-main-title">Standard Diagnostic & Status Commands</h2>
-        <p id="cheatsheetDesc" class="cheatsheet-desc-text">Standardized diagnostic and status command blocks for FortiGate Firewalls and FortiAnalyzer appliances. Click <strong>Copy Verified 1-Click Bundle</strong> to paste into your terminal, or click individual commands.</p>
+        <h2 class="cheatsheet-main-title" id="cheatsheetTitle">Standard Diagnostic &amp; Status Commands</h2>
+        <p class="cheatsheet-desc-text" id="cheatsheetDesc">Standardized diagnostic and status command blocks for FortiGate Firewalls and FortiAnalyzer appliances. Click <strong>Copy Verified 1-Click Bundle</strong> to paste into your terminal, or click individual commands.</p>
       </div>
       <div id="cheatsheetGroups"></div>
     </div>
-    
-    <div id="resultsHeading" style="display:none;"></div>
-    
-    <!-- 5. TOAST NOTIFICATION -->
+
+    <!-- 6. TOAST NOTIFICATION (Micro-pill) -->
     <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
   </div>
