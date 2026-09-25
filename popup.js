@@ -1380,7 +1380,7 @@ function checkFgtOspfNeighbors(text) {
     const rawState = match[3];
     const deadTime = match[4];
     const ip = match[5];
-    const interface = match[6];
+    const iface = match[6];
     const baseState = rawState.split("/")[0];
 
     neighbors.push({
@@ -1390,7 +1390,7 @@ function checkFgtOspfNeighbors(text) {
       baseState,
       deadTime,
       ip,
-      interface
+      interface: iface
     });
   }
 
@@ -2112,7 +2112,7 @@ function checkFgtIpsecTunnels(text) {
       component: "FortiGate IPSec Tunnels",
       status: "FAIL",
       findingText: `IPSec tunnel degradation detected: ${degraded.length} of ${tunnels.length} tunnel(s) experiencing Phase 2 failures:\n${bullets}`,
-      actionText: "Verify Phase 2 subnet parameters and NAT-T matching. To forcefully re-negotiate stuck IPsec selectors, clear the specific IKE gateway and flush the tunnel cache. To review tunnel traffic volume (Rx/Tx KB) and isolate idle tunnels, run 'get vpn ipsec tunnel details' or sort by 'Data' via the GUI IPsec Monitor.",
+      actionText: "Verify Phase 2 subnet parameters and NAT-T matching. To forcefully re-negotiate stuck IPsec selectors, clear the specific IKE gateway and flush the tunnel cache. To review tunnel traffic volume (Rx/Tx KB) and isolate idle tunnels, run 'get vpn ipsec tunnel details' or use the GUI IPsec Monitor.",
       remediationCli: `diagnose vpn ike gateway clear name ${firstName}\ndiagnose vpn tunnel flush ${firstName}`,
       source: "cli",
       data: { degradedCount: degraded.length }
@@ -9265,6 +9265,8 @@ const CHEAT_SHEET_GROUPS = [
       "diagnose autoupdate status",
       "get vpn ipsec tunnel summary",
       "get vpn ipsec tunnel details",
+      "diagnose vpn ike gateway list",
+      "diagnose vpn tunnel list",
       "diagnose sys sdwan health-check",
       "get system external-resource",
       "get system interface physical",
@@ -9294,6 +9296,8 @@ const CHEAT_SHEET_GROUPS = [
       { cmd: "diagnose autoupdate status", desc: "FortiGuard Sync connection and signature freshness (FGT-FG-01)" },
       { cmd: "get vpn ipsec tunnel summary", desc: "IPSec Tunnels selector status line-by-line (FGT-IPSEC-01)" },
       { cmd: "get vpn ipsec tunnel details", desc: "View detailed IPsec tunnel statistics including Rx/Tx data volume (KB) and up-time" },
+      { cmd: "diagnose vpn ike gateway list", desc: "Detailed Phase 1 IKE peer status, active negotiations, and authentications" },
+      { cmd: "diagnose vpn tunnel list", desc: "Detailed Phase 2 SA status, SPIs, and exact local/remote subnet selectors (FGT-IPSEC-01)" },
       { cmd: "diagnose sys sdwan health-check", desc: "SD-WAN SLA member alive/dead, loss %, latency (FGT-SDWAN-01)" },
       { cmd: "get system external-resource", desc: "Threat Feeds active status and synchronization (FGT-FEED-01)" },
       { cmd: "get system interface physical", desc: "Physical interface link status, speed, and duplex settings (FGT-NET-01)" },
@@ -10125,221 +10129,195 @@ function initEvents() {
   }
 
   // Paste Accordion Toggle
-  DOM.pasteToggleBtn.addEventListener("click", () => {
-    const isExpanded = DOM.pasteToggleBtn.getAttribute("aria-expanded") === "true";
-    DOM.pasteToggleBtn.setAttribute("aria-expanded", String(!isExpanded));
-    DOM.pasteBody.classList.toggle("is-collapsed", isExpanded);
-    if (!isExpanded) {
-      DOM.cliInput.focus();
-    }
-  });
+  if (DOM.pasteToggleBtn && DOM.pasteBody) {
+    DOM.pasteToggleBtn.addEventListener("click", () => {
+      const isExpanded = DOM.pasteToggleBtn.getAttribute("aria-expanded") === "true";
+      DOM.pasteToggleBtn.setAttribute("aria-expanded", !isExpanded);
+      DOM.pasteBody.classList.toggle("is-collapsed", isExpanded);
+      if (!isExpanded && DOM.cliInput) {
+        DOM.cliInput.focus();
+      }
+    });
+  }
 
-  // Dropzone Events (Multi-File)
-  DOM.dropZone.addEventListener("click", () => {
-    DOM.fileInput.click();
-  });
+  // Input changes
+  if (DOM.cliInput) {
+    DOM.cliInput.addEventListener("input", () => {
+      updateCharCounter();
+      updateDetectBadge(detectInputKind(DOM.cliInput.value || ""));
+      updateVerifiedHash(DOM.cliInput.value || "");
+    });
+  }
 
-  DOM.dropZone.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
+  // Action Buttons
+  if (DOM.analyzeBtn) {
+    DOM.analyzeBtn.addEventListener("click", () => {
+      let rawText = DOM.cliInput ? DOM.cliInput.value || "" : "";
+      if (!rawText.trim() && loadedFiles.length > 0) {
+        rawText = loadedFiles.map((f) => f.content).join("\n\n");
+        if (DOM.cliInput) DOM.cliInput.value = rawText;
+      }
+      if (!rawText.trim() && loadedFiles.length === 0) {
+        showToast("No data to analyze");
+        if (DOM.pasteToggleBtn && DOM.pasteBody) {
+          DOM.pasteToggleBtn.setAttribute("aria-expanded", "true");
+          DOM.pasteBody.classList.remove("is-collapsed");
+          if (DOM.cliInput) DOM.cliInput.focus();
+        }
+        return;
+      }
+      const kind = detectInputKind(rawText);
+      updateDetectBadge(kind);
+      updateTimestamp();
+      currentFindings = runAnalysis(rawText, loadedFiles);
+      renderFindings(currentFindings);
+      updateSummaryCounters(currentFindings);
+      setExportButtonsEnabled(true);
+      if (DOM.plainTextOutput) {
+        const { findings, opts } = getExportPayload();
+        DOM.plainTextOutput.textContent = generateCleanPlainText(findings, kind, opts);
+      }
+      updateVerifiedHash(rawText);
+      const issuesCount = currentFindings.filter((f) => f.status === "FAIL" || f.status === "WARN").length;
+      if (issuesCount > 0) {
+        showToast(`Analysis complete: ${issuesCount} item(s) require attention`);
+      } else {
+        showToast("Analysis complete: All checks passing");
+      }
+    });
+  }
+
+  if (DOM.clearBtn) {
+    DOM.clearBtn.addEventListener("click", () => {
+      clearAllFiles();
+      if (DOM.cliInput) DOM.cliInput.value = "";
+      updateCharCounter();
+      currentFindings = [];
+      renderFindings(currentFindings);
+      updateSummaryCounters(currentFindings);
+      setExportButtonsEnabled(false);
+      updateDetectBadge("none");
+      updateSummaryIndicator(0, 0);
+      updateVerifiedHash("");
+      if (DOM.plainTextOutput) {
+        DOM.plainTextOutput.textContent = "No analysis executed yet. Run Analyze Security to generate report.";
+      }
+      const deltaBanner = document.querySelector(".delta-backup-banner");
+      if (deltaBanner) deltaBanner.style.display = "none";
+      showToast("Cleared");
+    });
+  }
+
+  // Export Buttons
+  if (DOM.copyRichTextBtn) {
+    DOM.copyRichTextBtn.addEventListener("click", async () => {
+      if (!checkIssuesExportAllowed()) return;
+      const { findings, kind, opts } = getExportPayload();
+      const htmlReport = generateRichTextHtml(findings, kind, opts);
+      try {
+        await navigator.clipboard.write([
+          new ClipboardItem({
+            "text/html": new Blob([htmlReport], { type: "text/html" }),
+            "text/plain": new Blob([generateCleanPlainText(findings, kind, opts)], { type: "text/plain" })
+          })
+        ]);
+        showToast(UI_STRINGS[currentLang].toastCopiedRich || "Copied Rich Text!");
+      } catch (err) {
+        try {
+          await navigator.clipboard.writeText(generateCleanPlainText(findings, kind, opts));
+          showToast(UI_STRINGS[currentLang].toastCopiedPlain || "Copied Plain Text!");
+        } catch (fallbackErr) {
+          showToast("Clipboard copy failed");
+        }
+      }
+    });
+  }
+
+  if (DOM.copyPlainTextBtn) {
+    DOM.copyPlainTextBtn.addEventListener("click", async () => {
+      if (!checkIssuesExportAllowed()) return;
+      const { findings, kind, opts } = getExportPayload();
+      const plainReport = generateCleanPlainText(findings, kind, opts);
+      try {
+        await navigator.clipboard.writeText(plainReport);
+        showToast(UI_STRINGS[currentLang].toastCopiedPlain || "Copied Plain Text!");
+      } catch (err) {
+        showToast("Clipboard copy failed");
+      }
+    });
+  }
+
+  if (DOM.downloadHtmlBtn) {
+    DOM.downloadHtmlBtn.addEventListener("click", () => {
+      if (!checkIssuesExportAllowed()) return;
+      const { findings, kind, opts } = getExportPayload();
+      const docHtml = generateStandaloneHtmlDocument(findings, kind, opts);
+      const blob = new Blob([docHtml], { type: "text/html;charset=utf-8" });
+      downloadBlob(blob, `SecOps_Audit_Report_${getFormattedTimestampFilename()}.html`);
+      showToast(UI_STRINGS[currentLang].toastDownloaded || "HTML Report downloaded");
+    });
+  }
+
+  if (DOM.downloadTxtBtn) {
+    DOM.downloadTxtBtn.addEventListener("click", () => {
+      if (!checkIssuesExportAllowed()) return;
+      const { findings, kind, opts } = getExportPayload();
+      const txtReport = generateCleanPlainText(findings, kind, opts);
+      const blob = new Blob([txtReport], { type: "text/plain;charset=utf-8" });
+      downloadBlob(blob, `SecOps_Audit_Report_${getFormattedTimestampFilename()}.txt`);
+      showToast(UI_STRINGS[currentLang].toastDownloaded || "Text Report downloaded");
+    });
+  }
+
+  // File Drag & Drop
+  if (DOM.dropZone && DOM.fileInput) {
+    DOM.dropZone.addEventListener("click", () => {
       DOM.fileInput.click();
-    }
-  });
-
-  DOM.fileInput.addEventListener("change", (e) => {
-    if (e.target.files && e.target.files.length) {
-      handleFiles(e.target.files);
-    }
-  });
-
-  DOM.clearAllFilesBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    clearAllFiles();
-    showToast("All files cleared");
-  });
-
-  ["dragenter", "dragover"].forEach((eventName) => {
-    DOM.dropZone.addEventListener(eventName, (e) => {
+    });
+    DOM.dropZone.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        DOM.fileInput.click();
+      }
+    });
+    DOM.dropZone.addEventListener("dragover", (e) => {
       e.preventDefault();
-      e.stopPropagation();
       DOM.dropZone.classList.add("is-dragover");
     });
-  });
-
-  ["dragleave", "drop"].forEach((eventName) => {
-    DOM.dropZone.addEventListener(eventName, (e) => {
+    DOM.dropZone.addEventListener("dragleave", (e) => {
       e.preventDefault();
-      e.stopPropagation();
       DOM.dropZone.classList.remove("is-dragover");
     });
-  });
-
-  DOM.dropZone.addEventListener("drop", (e) => {
-    const dt = e.dataTransfer;
-    if (dt && dt.files && dt.files.length) {
-      handleFiles(dt.files);
-    }
-  });
-
-  // Direct Textarea Input
-  DOM.cliInput.addEventListener("input", () => {
-    updateCharCounter();
-    updateDetectBadge(detectInputKind(DOM.cliInput.value || ""));
-    updateVerifiedHash(DOM.cliInput.value || "");
-  });
-
-  // Analyze Button (Runs Deduplication Engine across all aggregated content)
-  DOM.analyzeBtn.addEventListener("click", () => {
-    let aggregatedText = DOM.cliInput.value || "";
-
-    if (!aggregatedText.trim() && loadedFiles.length > 0) {
-      aggregatedText = loadedFiles.map((f) => f.content).join("\n\n");
-      DOM.cliInput.value = aggregatedText;
-    }
-
-    if (!aggregatedText.trim()) {
-      showToast("Please provide CLI output or FortiOS configuration file.");
-      DOM.pasteToggleBtn.setAttribute("aria-expanded", "true");
-      DOM.pasteBody.classList.remove("is-collapsed");
-      DOM.cliInput.focus();
-      return;
-    }
-
-    const kind = detectInputKind(aggregatedText);
-    updateDetectBadge(kind);
-    updateTimestamp();
-
-    currentFindings = runAnalysis(aggregatedText, loadedFiles);
-    renderFindings(currentFindings);
-    updateSummaryCounters(currentFindings);
-
-    const hasFindings = currentFindings.length > 0;
-    setExportButtonsEnabled(hasFindings);
-
-    if (DOM.plainTextOutput) {
-      const { findings, opts } = getExportPayload();
-      DOM.plainTextOutput.textContent = generateCleanPlainText(findings, kind, opts);
-    }
-
-    updateVerifiedHash(aggregatedText);
-
-    const issuesCount = currentFindings.filter((f) => f.status === "FAIL" || f.status === "WARN").length;
-    if (issuesCount > 0) {
-      showToast(`Analysis completed: ${issuesCount} item(s) require attention`);
-    } else {
-      showToast("Analysis completed: All checks passing");
-    }
-  });
-
-  // Clear Button
-  DOM.clearBtn.addEventListener("click", () => {
-    clearAllFiles();
-    DOM.cliInput.value = "";
-    updateCharCounter();
-    currentFindings = [];
-    renderFindings([]);
-    updateSummaryCounters([]);
-    setExportButtonsEnabled(false);
-    updateDetectBadge("none");
-    updateSummaryIndicator(0, 0);
-    updateVerifiedHash("");
-    if (DOM.plainTextOutput) {
-      DOM.plainTextOutput.textContent = "No analysis executed yet. Run Analyze to generate report.";
-    }
-    const deltaBanner = document.querySelector(".delta-backup-banner");
-    if (deltaBanner) deltaBanner.style.display = "none";
-    showToast("Dashboard reset");
-  });
-
-  // 1. Copy for ClickUp (Rich Text with fallback plain text)
-  DOM.copyRichTextBtn.addEventListener("click", async () => {
-    if (!currentFindings.length) return;
-    if (!checkIssuesExportAllowed()) return;
-
-    const { findings, kind, opts } = getExportPayload();
-    const htmlReport = generateRichTextHtml(findings, kind, opts);
-    const plainReport = generateCleanPlainText(findings, kind, opts);
-
-    if (typeof ClipboardItem !== "undefined" && navigator.clipboard && navigator.clipboard.write) {
-      try {
-        const blobHtml = new Blob([htmlReport], { type: "text/html" });
-        const blobText = new Blob([plainReport], { type: "text/plain" });
-        const item = new ClipboardItem({
-          "text/html": blobHtml,
-          "text/plain": blobText,
-        });
-        await navigator.clipboard.write([item]);
-        showToast(UI_STRINGS[currentLang].toastCopiedRich);
-        return;
-      } catch (err) {
-        console.warn("ClipboardItem write failed, fallback to plain text:", err);
+    DOM.dropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      DOM.dropZone.classList.remove("is-dragover");
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        handleFiles(e.dataTransfer.files);
       }
-    }
+    });
+    DOM.fileInput.addEventListener("change", (e) => {
+      if (e.target && e.target.files && e.target.files.length > 0) {
+        handleFiles(e.target.files);
+      }
+    });
+  }
 
-    // Fallback
-    try {
-      await navigator.clipboard.writeText(plainReport);
-      showToast(UI_STRINGS[currentLang].toastCopiedPlain);
-    } catch (err) {
-      showToast("Clipboard copy failed");
-    }
-  });
-
-  // 2. Copy Clean Plain Text (Stripped of **, ##, etc.)
-  DOM.copyPlainTextBtn.addEventListener("click", async () => {
-    if (!currentFindings.length) return;
-    if (!checkIssuesExportAllowed()) return;
-
-    const { findings, kind, opts } = getExportPayload();
-    const plainReport = generateCleanPlainText(findings, kind, opts);
-
-    try {
-      await navigator.clipboard.writeText(plainReport);
-      showToast(UI_STRINGS[currentLang].toastCopiedPlain);
-    } catch (err) {
-      showToast("Clipboard copy failed");
-    }
-  });
-
-  // 3. Download Standalone HTML Report
-  DOM.downloadHtmlBtn.addEventListener("click", () => {
-    if (!currentFindings.length) return;
-    if (!checkIssuesExportAllowed()) return;
-
-    const { findings, kind, opts } = getExportPayload();
-    const htmlDoc = generateStandaloneHtmlDocument(findings, kind, opts);
-    const blob = new Blob([htmlDoc], { type: "text/html;charset=utf-8" });
-    const filename = `SecOps_HealthCheck_${getFormattedTimestampFilename()}_${currentLang}.html`;
-
-    downloadBlob(blob, filename);
-    showToast(UI_STRINGS[currentLang].toastDownloaded);
-  });
-
-  // 4. Download Clean Plain Text Report (.txt)
-  DOM.downloadTxtBtn.addEventListener("click", () => {
-    if (!currentFindings.length) return;
-    if (!checkIssuesExportAllowed()) return;
-
-    const { findings, kind, opts } = getExportPayload();
-    const plainReport = generateCleanPlainText(findings, kind, opts);
-    const blob = new Blob([plainReport], { type: "text/plain;charset=utf-8" });
-    const filename = `SecOps_HealthCheck_${getFormattedTimestampFilename()}_${currentLang}.txt`;
-
-    downloadBlob(blob, filename);
-    showToast(UI_STRINGS[currentLang].toastDownloaded);
-  });
+  if (DOM.clearAllFilesBtn) {
+    DOM.clearAllFilesBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      clearAllFiles();
+      showToast("All files cleared");
+    });
+  }
 }
 
-// ---------------------------------------------------------------------
-// Initialize on DOM Ready
-// ---------------------------------------------------------------------
+// Initialize App
 document.addEventListener("DOMContentLoaded", () => {
   if (DOM.filterIssuesOnly) {
     DOM.filterIssuesOnly.checked = issuesOnly;
   }
-  
   setLanguage(currentLang);
   initEvents();
+  setInterval(updateTimestamp, 1000);
   updateTimestamp();
-  setInterval(updateTimestamp, 60000);
 });
