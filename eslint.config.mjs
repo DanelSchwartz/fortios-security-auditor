@@ -1,6 +1,6 @@
 export default [
   {
-    files: ["popup.js"],
+    files: ["popup.js", "**/popup.js"],
     languageOptions: {
       sourceType: "script",
       globals: {
