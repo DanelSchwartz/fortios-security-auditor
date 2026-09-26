@@ -2080,7 +2080,7 @@ function checkFgtIpsecTunnels(text) {
       if (tunnelsMap.has(tName)) {
         tunnelsMap.get(tName).deadSelectors.push(formattedSelector);
       } else {
-        // Fallback: Fuzzy matching for Dial-Up/Dynamic indexing 
+        // Fallback: Fuzzy matching for Dial-Up/Dynamic indexing (e.g., matching 'DialUp_VPN_11' to parent 'DialUp_VPN')
         let matchedParent = null;
         for (const parentKey of tunnelsMap.keys()) {
           if (tName.startsWith(parentKey)) {
@@ -2655,7 +2655,7 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
   ].join("\n");
 
   const actionText =
-    "Enforce FortiToken Mobile or Email MFA on all remaining LDAP users, audit and remove obsolete test/admin accounts, or migrate SSL-VPN authentication to SAML (Microsoft Entra ID / Okta) with centralized Conditional Access MFA.";
+    "Enforce FortiToken Mobile or Email MFA on all remaining LDAP users, audit and remove obsolete test/admin accounts (e.g., 'test_user', 'vendor_vpn'), or migrate SSL-VPN authentication to SAML (Microsoft Entra ID / Okta) with centralized Conditional Access MFA.";
 
   // Global SAML enforced
   if (hasGlobalSaml && insecurePasswordAccounts.length === 0) {
@@ -7420,27 +7420,23 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
   }
 
   if (text) {
-    // FIXED REGEX: Properly handle spaces before and after the colon/equals
-    const scMatch = /(?:^|\r?\n)\s*(?:set\s+)?strong-crypto\s*(?:[:=]\s*|\s+)([a-zA-Z0-9_-]+)/i.exec(text);
-    if (scMatch) {
-      const detectedVal = cleanVal(scMatch[1]).toLowerCase();
-      if (detectedVal === "enable" || detectedVal === "disable") {
-        strongCrypto = detectedVal;
-      }
+    // STRICT HORIZONTAL MATCH: Prevents the regex from swallowing newlines and confusing the command with the output
+    const scMatches = [...text.matchAll(/\bstrong-crypto[^\S\r\n]*(?:[:=][^\S\r\n]*|[^\S\r\n]+)(enable|disable)\b/gi)];
+    if (scMatches.length > 0) {
+      // Take the last match to allow the actual output to override any potential command-line artifacts
+      strongCrypto = cleanVal(scMatches[scMatches.length - 1][1]).toLowerCase();
     }
 
     const globalScopeText = extractSystemGlobalScope(text);
     const searchScope = globalScopeText || text;
 
     if (!sslMinVer) {
-      // FIXED REGEX: Properly handle spaces before and after the colon/equals
-      const cliVerMatch = /(?:^|\r?\n)\s*(?:set\s+)?(?:ssl-min-proto-version|ssl-min-proto-ver)\s*(?:[:=]\s*|\s+)([a-zA-Z0-9_.-]+)/i.exec(searchScope);
-      if (cliVerMatch) {
-        sslMinVer = cleanVal(cliVerMatch[1]);
-      } else if (globalScopeText) {
-        const confVerMatch = /(?:^|\r?\n)\s*set\s+(?:ssl-min-proto-version|ssl-min-proto-ver)\s+([a-zA-Z0-9_.-]+)/i.exec(globalScopeText);
-        if (confVerMatch) {
-          sslMinVer = cleanVal(confVerMatch[1]);
+      const cliVerMatches = [...searchScope.matchAll(/\b(?:ssl-min-proto-version|ssl-min-proto-ver)[^\S\r\n]*(?:[:=][^\S\r\n]*|[^\S\r\n]+)([a-zA-Z0-9_.-]+)/gi)];
+      for (const m of cliVerMatches) {
+        const val = cleanVal(m[1]);
+        // Ignore the CLI command artifacts itself
+        if (val && !/^(?:enable|disable|grep|show|get|system|global|ssl-min-proto-version|ssl-min-proto-ver)$/i.test(val)) {
+          sslMinVer = val;
         }
       }
     }
