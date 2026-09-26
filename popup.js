@@ -2066,30 +2066,43 @@ function checkFgtIpsecTunnels(text) {
     }
   }
 
-  // 2. Parse Detailed Tunnel List (sa=0 Dead Selectors)
+  // 2. Parse Detailed Tunnel List (sa=0 Dead Selectors) with Fuzzy Parent Matching
   if (hasList) {
     const proxyRe = /proxyid=([^\s]+)[^\n]*?sa=0[^\n]*\r?\n\s*src:\s*([^\r\n]+)\r?\n\s*dst:\s*([^\r\n]+)/gi;
     let pm;
     while ((pm = proxyRe.exec(text)) !== null) {
       const tName = pm[1];
-      // Cleanup "0:192.168.10.0/255.255.255.0:0" -> "192.168.10.0/255.255.255.0"
-      let src = pm[2].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
-      let dst = pm[3].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
+      const src = pm[2].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
+      const dst = pm[3].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
+      const formattedSelector = `Local: ${src} -> Remote: ${dst}`;
 
-      if (src === "0.0.0.0-255.255.255.255" || src === "0.0.0.0/0.0.0.0") src = "0.0.0.0/0 (Any)";
-      if (dst === "0.0.0.0-255.255.255.255" || dst === "0.0.0.0/0.0.0.0") dst = "0.0.0.0/0 (Any)";
-
+      // Check Exact Match
       if (tunnelsMap.has(tName)) {
-        tunnelsMap.get(tName).deadSelectors.push(`Local: ${src} -> Remote: ${dst}`);
+        tunnelsMap.get(tName).deadSelectors.push(formattedSelector);
       } else {
-        // Found dead selector but no summary info (partial log snippet)
-        tunnelsMap.set(tName, {
-          name: tName,
-          peer: "Unknown",
-          total: 1,
-          up: 0,
-          deadSelectors: [`Local: ${src} -> Remote: ${dst}`]
-        });
+        // Fallback: Fuzzy matching for Dial-Up/Dynamic indexing 
+        let matchedParent = null;
+        for (const parentKey of tunnelsMap.keys()) {
+          if (tName.startsWith(parentKey)) {
+            // Pick the longest matching parent to avoid false positives on similar names
+            if (!matchedParent || parentKey.length > matchedParent.length) {
+              matchedParent = parentKey;
+            }
+          }
+        }
+
+        if (matchedParent) {
+          tunnelsMap.get(matchedParent).deadSelectors.push(formattedSelector);
+        } else {
+          // Absolute fallback if no parent exists (partial snippet scenario)
+          tunnelsMap.set(tName, {
+            name: tName,
+            peer: "Unknown",
+            total: 1,
+            up: 0,
+            deadSelectors: [formattedSelector]
+          });
+        }
       }
     }
   }
@@ -2105,15 +2118,26 @@ function checkFgtIpsecTunnels(text) {
       let line = `  • Tunnel '${t.name}'${peerText} - Selectors: ${t.up}/${t.total} UP`;
       
       if (t.deadSelectors.length > 0) {
-        const formattedSelectors = t.deadSelectors.map(s => {
+        // Remove duplicate identical dead selectors (happens with multi-proxyid indexing)
+        const uniqueDeadSelectors = [...new Set(t.deadSelectors)];
+        
+        const formattedSelectors = uniqueDeadSelectors.map(s => {
           // Clean up ugly FortiOS Any ranges
-          const cleanS = s.replace(/0\.0\.0\.0-255\.255\.255\.255/g, "0.0.0.0/0 (Any)")
-                          .replace(/0\.0\.0\.0\/0\.0\.0\.0/g, "0.0.0.0/0 (Any)");
-          return `  • ↳ [DOWN] ${cleanS}`;
+          let cleanS = s.replace(/0\.0\.0\.0-255\.255\.255\.255/g, "0.0.0.0/0 (Any)")
+                        .replace(/0\.0\.0\.0\/0\.0\.0\.0/g, "0.0.0.0/0 (Any)");
+          
+          // Deduplicate single-host ranges (e.g. 10.1.1.1-10.1.1.1 -> 10.1.1.1)
+          const singleHostRe = /\b(\d{1,3}(?:\.\d{1,3}){3})-(\1)\b/g;
+          cleanS = cleanS.replace(singleHostRe, "$1");
+
+          return `    ↳ [DOWN] ${cleanS}`;
         }).join("\n");
         line += `\n${formattedSelectors}`;
+      } else if (t.up < t.total) {
+        line += `\n    ↳ [DOWN] Selector details unavailable in diagnostic output (Phase 1 may be down).`;
       }
-      return line;
+      
+      return line + `\n`;
     }).join("\n");
 
     const firstName = degraded[0].name;
@@ -2122,7 +2146,7 @@ function checkFgtIpsecTunnels(text) {
       id: "FGT-IPSEC-01",
       component: "FortiGate IPSec Tunnels",
       status: "FAIL",
-      findingText: `IPSec tunnel degradation detected: ${degraded.length} of ${tunnels.length} tunnel(s) experiencing Phase 2 failures:\n${bullets}`,
+      findingText: `IPSec tunnel degradation detected: ${degraded.length} of ${tunnels.length} tunnel(s) experiencing Phase 2 failures:\n${bullets.trimEnd()}`,
       actionText: "Verify Phase 2 subnet parameters and NAT-T matching. To forcefully re-negotiate stuck IPsec selectors, clear the specific IKE gateway and flush the tunnel cache. To review tunnel traffic volume (Rx/Tx KB) and isolate idle tunnels, run 'get vpn ipsec tunnel details' or use the GUI IPsec Monitor.",
       remediationCli: `diagnose vpn ike gateway clear name ${firstName}\ndiagnose vpn tunnel flush ${firstName}`,
       source: "cli",
@@ -2631,7 +2655,7 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
   ].join("\n");
 
   const actionText =
-    "Enforce FortiToken Mobile or Email MFA on all remaining LDAP users, audit and remove obsolete test/admin accounts (e.g., 'test1', 'iteam_VPN'), or migrate SSL-VPN authentication to SAML (Microsoft Entra ID / Okta) with centralized Conditional Access MFA.";
+    "Enforce FortiToken Mobile or Email MFA on all remaining LDAP users, audit and remove obsolete test/admin accounts, or migrate SSL-VPN authentication to SAML (Microsoft Entra ID / Okta) with centralized Conditional Access MFA.";
 
   // Global SAML enforced
   if (hasGlobalSaml && insecurePasswordAccounts.length === 0) {
