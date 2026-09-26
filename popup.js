@@ -24,6 +24,7 @@ const THRESHOLDS = {
   fazCpuFail: 80,
   fazMemFail: 85,
   fazIdleWarnSeconds: 60,
+  fgtTopProcessCpuWarn: 80,
 };
 
 const SEVERITY_RANK = {
@@ -199,6 +200,9 @@ const DIAGNOSTIC_COMMANDS = {
   "OPS-DNS-01": "diagnose debug rating",
   "OPS-MED-02": "get router info bgp dampening flap-statistics",
   "OPS-BGP-01": "get router info bgp dampening flap-statistics",
+  "OPS-HA-02": "diagnose sys ha checksum cluster",
+  "OPS-SYS-04": "diagnose sys top 1 1",
+  "SEC-SESS-01": "diagnose firewall auth list",
   "FAZ-HIGH-01": "diagnose fortilogd lograte-device",
   "FAZ-FWD-01": "diagnose fortilogd lograte-device",
   "FAZ-CRIT-01": "diagnose system raid status",
@@ -512,6 +516,56 @@ function renderFindingText(f, lang = "en") {
         return "Log indexing pipeline is healthy: log insertion rate is balanced.";
       } else {
         return "Log indexing latency detected: indexing queue backlogged.";
+      }
+
+    case "OPS-HA-02":
+      if (lang === "he") {
+        if (f.status === "PASS") {
+          return `סיכומי התצורה של אשכול ה-HA (גלובלי וכל ה-VDOMs) זהים בכל ${d.memberCount ?? 2} חברי האשכול.`;
+        } else if (f.status === "INFO") {
+          return "רק חבר אשכול אחד קיים בפלט — השוואת תצורה דורשת פלט מכל חברי ה-HA.";
+        } else {
+          return `זוהתה אי-התאמה (Drift) בתצורת ה-HA: סיכומי ביקורת שונים מול ה-Primary ב-Scope: ${(d.mismatchedScopes || []).join(", ") || "VDOM/global"}.`;
+        }
+      }
+      if (f.status === "PASS") {
+        return `HA cluster configuration checksums (global + all VDOM scopes) are identical across all ${d.memberCount ?? 2} cluster members.`;
+      } else if (f.status === "INFO") {
+        return "Only one cluster member present in output — drift comparison requires checksum output from all HA members.";
+      } else {
+        return f.findingText || `HA configuration drift detected across cluster members.`;
+      }
+
+    case "OPS-SYS-04":
+      if (lang === "he") {
+        if (f.status === "PASS") {
+          return `התהליך המוביל בניצול משאבים הוא '${d.name || "daemon"}' (PID ${d.pid || 0}) ב-${d.cpuPct ?? 0}% CPU, בטווח התקין.`;
+        } else {
+          return `תהליך '${d.name || "daemon"}' (PID ${d.pid || 0}, מצב ${d.state || "R"}) צורך ${d.cpuPct ?? 0}% CPU ו-${d.memPct ?? 0}% זיכרון — צרכן המשאבים המוביל בצילום מצב זה.`;
+        }
+      }
+      if (f.status === "PASS") {
+        return `Top process by resource usage is '${d.name || "daemon"}' (PID ${d.pid || 0}) at ${d.cpuPct ?? 0}% CPU, within normal range.`;
+      } else {
+        return `Process '${d.name || "daemon"}' (PID ${d.pid || 0}, state ${d.state || "R"}) is consuming ${d.cpuPct ?? 0}% CPU and ${d.memPct ?? 0}% memory — the top resource consumer in this snapshot.`;
+      }
+
+    case "SEC-SESS-01":
+      if (lang === "he") {
+        if (f.status === "PASS") {
+          return `לא נמצאו הפעלות כפולות מקבילות או רשומות שתוקפן פג מתוך ${d.totalSessions ?? 0} הפעלות מאומתות בלכידה זו.`;
+        } else if (f.status === "INFO") {
+          return "אין הפעלות משתמשים מאומתות בלכידה זו.";
+        } else {
+          return f.findingText || `זוהו חריגות בהפעלות משתמשים מאומתות.`;
+        }
+      }
+      if (f.status === "PASS") {
+        return `No duplicate concurrent sessions or expired-but-listed entries found among ${d.totalSessions ?? 0} authenticated sessions in this capture.`;
+      } else if (f.status === "INFO") {
+        return "No authenticated user sessions present in this capture.";
+      } else {
+        return f.findingText || `Authenticated user session anomalies detected.`;
       }
 
     default:
@@ -3782,6 +3836,126 @@ function checkOpsHaHistory(text) {
   });
 }
 
+function checkOpsHaClusterChecksum(text) {
+  if (!text || typeof text !== "string") return null;
+
+  if (
+    !hasCommand(text, "diagnose sys ha checksum cluster") &&
+    !/is_manage_(?:primary|master)\(\)=/i.test(text)
+  ) {
+    return null;
+  }
+
+  const headerRegex = /is_manage_(?:primary|master)\(\)=(\d+),\s*cluster_index=(\d+):/gi;
+  const headerMatches = [...text.matchAll(headerRegex)];
+
+  if (headerMatches.length === 0) {
+    return null;
+  }
+
+  const memberBlocks = [];
+  for (let i = 0; i < headerMatches.length; i++) {
+    const current = headerMatches[i];
+    const isPrimary = parseInt(current[1], 10) === 1;
+    const clusterIndex = parseInt(current[2], 10);
+    const startIdx = current.index + current[0].length;
+    const endIdx = (i + 1 < headerMatches.length) ? headerMatches[i + 1].index : text.length;
+    const blockText = text.substring(startIdx, endIdx);
+
+    const scopes = {};
+    const lines = blockText.split(/\r?\n/);
+    for (const line of lines) {
+      if (/^[A-Za-z0-9_.-]+(?:\s*\([^)]+\))?\s*[#$]/i.test(line)) break;
+      const m = /^\s*([a-zA-Z0-9_.-]+)\s*:\s*([a-fA-F0-9]{8,64})\b/i.exec(line);
+      if (m) {
+        scopes[m[1].toLowerCase()] = m[2].toLowerCase();
+      }
+    }
+
+    memberBlocks.push({
+      clusterIndex,
+      isPrimary,
+      scopes
+    });
+  }
+
+  if (memberBlocks.length < 2) {
+    return makeFinding({
+      id: "OPS-HA-02",
+      component: "FortiGate HA Configuration Checksum",
+      status: "INFO",
+      source: "cli",
+      data: { memberCount: memberBlocks.length, members: memberBlocks },
+      findingText: "Only one cluster member present in output — drift comparison requires checksum output from all HA members.",
+      actionText: "",
+      remediationCli: "",
+      diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-HA-02"] || "diagnose sys ha checksum cluster",
+      targetConfig: "diagnose sys ha checksum cluster"
+    });
+  }
+
+  const allScopeSet = new Set();
+  for (const m of memberBlocks) {
+    for (const s of Object.keys(m.scopes)) {
+      allScopeSet.add(s);
+    }
+  }
+  const allScopes = Array.from(allScopeSet);
+
+  const mismatchedScopes = [];
+  const mismatchedDetails = [];
+  const primaryMember = memberBlocks.find(m => m.isPrimary) || memberBlocks[0];
+
+  for (const scope of allScopes) {
+    const primaryVal = primaryMember.scopes[scope];
+    const disagreeing = memberBlocks.filter(m => m.scopes[scope] !== primaryVal);
+
+    if (disagreeing.length > 0) {
+      mismatchedScopes.push(scope);
+      const disagreeCount = `${disagreeing.length} of ${memberBlocks.length} members disagree with primary`;
+      mismatchedDetails.push(`${scope} (${disagreeCount})`);
+    }
+  }
+
+  if (mismatchedScopes.length > 0) {
+    return makeFinding({
+      id: "OPS-HA-02",
+      component: "FortiGate HA Configuration Checksum",
+      status: "FAIL",
+      source: "cli",
+      data: {
+        memberCount: memberBlocks.length,
+        members: memberBlocks,
+        mismatchedScopes,
+        allScopes
+      },
+      findingText: `Configuration drift detected in HA cluster: Mismatched checksums in scope(s) ${mismatchedDetails.join(", ")}.`,
+      actionText: `Configuration drift detected in scope(s) ${mismatchedScopes.join(", ")}. Run 'diagnose sys ha checksum show <vdom>' on the affected node(s) to isolate the mismatched sub-object, then run 'diagnose sys ha checksum recalculate' if the change appears stuck in the debug zone, or 'execute ha synchronize start' to force re-sync.`,
+      remediationCli: "diagnose sys ha checksum recalculate\nexecute ha synchronize start",
+      diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-HA-02"] || "diagnose sys ha checksum cluster",
+      targetConfig: "diagnose sys ha checksum cluster"
+    });
+  }
+
+  return makeFinding({
+    id: "OPS-HA-02",
+    component: "FortiGate HA Configuration Checksum",
+    status: "PASS",
+    source: "cli",
+    data: {
+      memberCount: memberBlocks.length,
+      members: memberBlocks,
+      allScopes,
+      mismatchedScopes: []
+    },
+    findingText: `HA cluster configuration checksums (global + all VDOM scopes) are identical across all ${memberBlocks.length} cluster members.`,
+    actionText: "",
+    remediationCli: "",
+    diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-HA-02"] || "diagnose sys ha checksum cluster",
+    targetConfig: "diagnose sys ha checksum cluster"
+  });
+}
+
 function checkOpsRatingServers(text) {
   if (!text.includes("diagnose debug rating") && !/Server:\s*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}.*?Latency/i.test(text) && !/RTT\s*=/i.test(text)) return null;
 
@@ -3880,6 +4054,252 @@ function checkOpsBgpDampening(text) {
     remediationCli: `config router bgp\n    set dampening enable\n    set dampening-half-life 15\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-BGP-01"],
     targetConfig: "get router info bgp dampening flap-statistics"
+  });
+}
+
+const OPS_SYS_TOP_CPU_WARN_THRESHOLD = 80;
+
+function checkOpsProcessCpu(text) {
+  if (!text || typeof text !== "string") return null;
+
+  if (
+    !hasCommand(text, "diagnose sys top") &&
+    !/\d+U,\s*\d+S,\s*\d+I;\s*\d+T,\s*\d+F/i.test(text)
+  ) {
+    return null;
+  }
+
+  const headerMatch = /(\d+)U,\s*(\d+)S,\s*(\d+)I;\s*(\d+)T,\s*(\d+)F/i.exec(text);
+  const header = headerMatch ? {
+    user: parseInt(headerMatch[1], 10),
+    sys: parseInt(headerMatch[2], 10),
+    idle: parseInt(headerMatch[3], 10),
+    total: parseInt(headerMatch[4], 10),
+    free: parseInt(headerMatch[5], 10)
+  } : null;
+
+  const procMatch = /^\s*(\S+)\s+(\d+)\s+([SRZD])\s*(<)?\s+([\d.]+)\s+([\d.]+)/m.exec(text);
+  if (!procMatch) {
+    return null;
+  }
+
+  const name = procMatch[1];
+  const pid = parseInt(procMatch[2], 10);
+  const state = procMatch[3];
+  const highPriority = !!procMatch[4];
+  const cpuPct = parseFloat(procMatch[5]);
+  const memPct = parseFloat(procMatch[6]);
+
+  const threshold = (typeof THRESHOLDS !== "undefined" && THRESHOLDS.fgtTopProcessCpuWarn)
+    ? THRESHOLDS.fgtTopProcessCpuWarn
+    : OPS_SYS_TOP_CPU_WARN_THRESHOLD;
+
+  const data = {
+    name,
+    pid,
+    state,
+    highPriority,
+    cpuPct,
+    memPct,
+    cpuUser: header ? header.user : null,
+    cpuSys: header ? header.sys : null,
+    cpuIdle: header ? header.idle : null,
+    memTotal: header ? header.total : null,
+    memFree: header ? header.free : null,
+    threshold
+  };
+
+  if (cpuPct >= threshold) {
+    return makeFinding({
+      id: "OPS-SYS-04",
+      component: "FortiGate Process CPU/Memory Utilization",
+      status: "WARN",
+      source: "cli",
+      data,
+      findingText: `Process '${name}' (PID ${pid}, state ${state}) is consuming ${cpuPct}% CPU and ${memPct}% memory — the top resource consumer in this snapshot.`,
+      actionText: `If '${name}' remains the top consumer across repeated checks, capture a longer sample with 'diagnose sys top 5 5' and review that daemon's debug output (e.g. 'diagnose debug application ${name} -1') before considering a restart via 'diagnose sys process pidof ${name}' + 'diagnose sys kill 11 ${pid}' — the kill command is destructive, mention it only as a last-resort reference, never as an auto-suggested first step.`,
+      remediationCli: "",
+      diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-SYS-04"] || "diagnose sys top 1 1",
+      targetConfig: "diagnose sys top 1 1"
+    });
+  }
+
+  return makeFinding({
+    id: "OPS-SYS-04",
+    component: "FortiGate Process CPU/Memory Utilization",
+    status: "PASS",
+    source: "cli",
+    data,
+    findingText: `Top process by resource usage is '${name}' (PID ${pid}) at ${cpuPct}% CPU, within normal range.`,
+    actionText: "",
+    remediationCli: "",
+    diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-SYS-04"] || "diagnose sys top 1 1",
+    targetConfig: "diagnose sys top 1 1"
+  });
+}
+
+function checkSecAuthSessions(text) {
+  if (!text || typeof text !== "string") return null;
+
+  if (
+    !hasCommand(text, "diagnose firewall auth list") &&
+    !/-----\s*\d+\s+listed/i.test(text) &&
+    !/duration:\s*\d+,\s*expire:/i.test(text)
+  ) {
+    return null;
+  }
+
+  const summaryMatch = /-----\s*(\d+)\s+listed,\s*(\d+)\s+filtered\s*-----/i.exec(text);
+  const listedCount = summaryMatch ? parseInt(summaryMatch[1], 10) : null;
+  const filteredCount = summaryMatch ? parseInt(summaryMatch[2], 10) : null;
+
+  const entryHeaderRegex = /^\s*(\d{1,3}(?:\.\d{1,3}){3}),\s*(\S+)\s*$/gm;
+  const entryMatches = [...text.matchAll(entryHeaderRegex)];
+
+  const entries = [];
+  for (let i = 0; i < entryMatches.length; i++) {
+    const current = entryMatches[i];
+    const srcip = current[1];
+    const username = current[2];
+    const startIdx = current.index + current[0].length;
+    let endIdx = (i + 1 < entryMatches.length) ? entryMatches[i + 1].index : text.length;
+    if (summaryMatch && summaryMatch.index > current.index && summaryMatch.index < endIdx) {
+      endIdx = summaryMatch.index;
+    }
+    const block = text.substring(startIdx, endIdx);
+
+    const durM = /duration:\s*(\d+)/i.exec(block);
+    const expM = /expire:\s*(-?\d+)/i.exec(block);
+    const srvM = /server:\s*(\S+)/i.exec(block);
+    const grpM = /group:\s*(\S+)/i.exec(block);
+    const vdmM = /vdom:\s*(\S+)/i.exec(block);
+
+    entries.push({
+      srcip,
+      username,
+      duration: durM ? parseInt(durM[1], 10) : 0,
+      expire: expM ? parseInt(expM[1], 10) : 0,
+      server: srvM ? srvM[1] : "",
+      group: grpM ? grpM[1] : "",
+      vdom: vdmM ? vdmM[1] : ""
+    });
+  }
+
+  if (listedCount !== null && listedCount !== entries.length) {
+    console.warn(`SEC-SESS-01: Parsed ${entries.length} entries but summary line reported ${listedCount} listed`);
+  }
+
+  if (listedCount === 0 || (entries.length === 0 && summaryMatch)) {
+    return makeFinding({
+      id: "SEC-SESS-01",
+      component: "Authenticated User Sessions",
+      status: "INFO",
+      source: "cli",
+      data: { totalSessions: 0, listedCount: 0, filteredCount: filteredCount || 0, entries: [] },
+      findingText: "No authenticated user sessions present in this capture.",
+      actionText: "",
+      remediationCli: "",
+      diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-SESS-01"] || "diagnose firewall auth list",
+      targetConfig: "diagnose firewall auth list"
+    });
+  }
+
+  if (entries.length === 0) {
+    return null;
+  }
+
+  // Deduplicate exact (username + srcip) pairs silently per requirement
+  const seenUserIp = new Set();
+  const dedupedEntries = [];
+  for (const entry of entries) {
+    const key = `${entry.username}:::${entry.srcip}`;
+    if (!seenUserIp.has(key)) {
+      seenUserIp.add(key);
+      dedupedEntries.push(entry);
+    }
+  }
+
+  // Pattern a: Group by username -> 2+ distinct srcip
+  const userIpMap = new Map();
+  for (const entry of dedupedEntries) {
+    if (!userIpMap.has(entry.username)) {
+      userIpMap.set(entry.username, []);
+    }
+    userIpMap.get(entry.username).push(entry.srcip);
+  }
+
+  const duplicateUsers = [];
+  for (const [uname, ips] of userIpMap.entries()) {
+    if (ips.length >= 2) {
+      duplicateUsers.push({ username: uname, ips });
+    }
+  }
+
+  // Pattern b: Stale / expired-but-listed entries (expire <= 0)
+  const staleSessions = entries.filter(e => e.expire <= 0);
+
+  const data = {
+    totalSessions: entries.length,
+    listedCount: listedCount !== null ? listedCount : entries.length,
+    filteredCount: filteredCount || 0,
+    duplicateUsers,
+    staleSessions,
+    entries
+  };
+
+  const findingsList = [];
+  const actionList = [];
+  const remList = [];
+
+  if (duplicateUsers.length > 0) {
+    for (const u of duplicateUsers) {
+      findingsList.push(
+        `User '${u.username}' has ${u.ips.length} concurrent authenticated sessions from different source IPs in this capture: ${u.ips.join(", ")}. This can indicate shared credentials, a VPN client reconnect that left a stale entry, or legitimate multi-device use — cross-check session start times and known user devices before treating this as an incident.`
+      );
+    }
+    actionList.push(
+      "Cross-check session start times and known user devices before treating concurrent sessions as an incident. If unauthorized, verify VPN reconnection logs."
+    );
+  }
+
+  if (staleSessions.length > 0) {
+    for (const s of staleSessions) {
+      findingsList.push(
+        `Session for '${s.username}' from ${s.srcip} shows expire=${s.expire} (already timed out) but is still present in the active session table. This typically indicates a session cleanup/GC delay on the device rather than a security event — if it persists across repeated checks, consider 'diagnose firewall auth filter user ${s.username}' followed by 'diagnose firewall auth clear' to force a clean re-authentication.`
+      );
+      remList.push(`diagnose firewall auth filter user ${s.username}\ndiagnose firewall auth clear`);
+    }
+    actionList.push(
+      "If stale/expired session entries persist across repeated checks, filter and clear the session via CLI: diagnose firewall auth filter user <username> followed by diagnose firewall auth clear."
+    );
+  }
+
+  if (findingsList.length > 0) {
+    return makeFinding({
+      id: "SEC-SESS-01",
+      component: "Authenticated User Sessions",
+      status: "WARN",
+      source: "cli",
+      data,
+      findingText: findingsList.join("\n\n"),
+      actionText: actionList.join(" "),
+      remediationCli: remList.join("\n"),
+      diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-SESS-01"] || "diagnose firewall auth list",
+      targetConfig: "diagnose firewall auth list"
+    });
+  }
+
+  return makeFinding({
+    id: "SEC-SESS-01",
+    component: "Authenticated User Sessions",
+    status: "PASS",
+    source: "cli",
+    data,
+    findingText: `No duplicate concurrent sessions or expired-but-listed entries found among ${entries.length} authenticated sessions in this capture.`,
+    actionText: "",
+    remediationCli: "",
+    diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-SESS-01"] || "diagnose firewall auth list",
+    targetConfig: "diagnose firewall auth list"
   });
 }
 
@@ -7420,8 +7840,8 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
   }
 
   if (text) {
-    // STRICT HORIZONTAL MATCH: Prevents the regex from swallowing newlines and confusing the command with the output
-    const scMatches = [...text.matchAll(/\bstrong-crypto[^\S\r\n]*(?:[:=][^\S\r\n]*|[^\S\r\n]+)(enable|disable)\b/gi)];
+    // STRICT HORIZONTAL MATCH: Uses space, tab, and non-breaking space (\xA0) to prevent newline traversal.
+    const scMatches = [...text.matchAll(/\bstrong-crypto(?:[ \t\xA0]*[:=][ \t\xA0]*|[ \t\xA0]+)(enable|disable)\b/gi)];
     if (scMatches.length > 0) {
       // Take the last match to allow the actual output to override any potential command-line artifacts
       strongCrypto = cleanVal(scMatches[scMatches.length - 1][1]).toLowerCase();
@@ -7431,13 +7851,9 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
     const searchScope = globalScopeText || text;
 
     if (!sslMinVer) {
-      const cliVerMatches = [...searchScope.matchAll(/\b(?:ssl-min-proto-version|ssl-min-proto-ver)[^\S\r\n]*(?:[:=][^\S\r\n]*|[^\S\r\n]+)([a-zA-Z0-9_.-]+)/gi)];
-      for (const m of cliVerMatches) {
-        const val = cleanVal(m[1]);
-        // Ignore the CLI command artifacts itself
-        if (val && !/^(?:enable|disable|grep|show|get|system|global|ssl-min-proto-version|ssl-min-proto-ver)$/i.test(val)) {
-          sslMinVer = val;
-        }
+      const cliVerMatches = [...searchScope.matchAll(/\b(?:ssl-min-proto-version|ssl-min-proto-ver)(?:[ \t\xA0]*[:=][ \t\xA0]*|[ \t\xA0]+)([a-zA-Z0-9_.-]+)\b/gi)];
+      if (cliVerMatches.length > 0) {
+        sslMinVer = cleanVal(cliVerMatches[cliVerMatches.length - 1][1]);
       }
     }
   }
@@ -7818,6 +8234,9 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
     { id: "OPS-BGP-01", fn: () => checkOpsBgpDampening(deviceText) },
     { id: "FAZ-FWD-01", fn: () => checkFazSilentForwarder(deviceText) },
     { id: "FAZ-DISK-01", fn: () => checkFazRaidHealth(deviceText) },
+    { id: "OPS-HA-02", fn: () => checkOpsHaClusterChecksum(deviceText) },
+    { id: "OPS-SYS-04", fn: () => checkOpsProcessCpu(deviceText) },
+    { id: "SEC-SESS-01", fn: () => checkSecAuthSessions(deviceText) },
   ];
 
   let hasOperationalCliFinding = false;
@@ -8080,6 +8499,9 @@ function getFindingTargetConfig(f) {
     "OPS-DNS-01": "diagnose debug rating",
     "OPS-MED-02": "get router info bgp dampening flap-statistics",
     "OPS-BGP-01": "get router info bgp dampening flap-statistics",
+    "OPS-HA-02": "diagnose sys ha checksum cluster",
+    "OPS-SYS-04": "diagnose sys top 1 1",
+    "SEC-SESS-01": "diagnose firewall auth list",
     "FAZ-HIGH-01": "diagnose fortilogd lograte-device",
     "FAZ-FWD-01": "diagnose fortilogd lograte-device",
     "FAZ-CRIT-01": "diagnose system raid status",
@@ -9279,11 +9701,13 @@ const CHEAT_SHEET_GROUPS = [
       "end",
       "get system status",
       "get system performance status",
+      "diagnose sys top 1 1",
       "diagnose hardware sysinfo conserve",
       "diagnose sys session stat",
       "get router info bgp summary",
       "get router info ospf neighbor",
       "get system ha status",
+      "diagnose sys ha checksum cluster",
       "get system global",
       "get system global | grep -i strong-crypto",
       "get system global | grep -i ssl-min",
@@ -9300,6 +9724,7 @@ const CHEAT_SHEET_GROUPS = [
       "get vpn certificate local details",
       "show system interface | grep -i allowaccess",
       "show user local",
+      "diagnose firewall auth list",
       "diagnose user ban list",
       "diagnose test application miglogd 6",
       "diagnose debug crashlog read",
@@ -9310,11 +9735,13 @@ const CHEAT_SHEET_GROUPS = [
     items: [
       { cmd: "get system status", desc: "Uptime (FGT-SYS-01), firmware build, and licensing" },
       { cmd: "get system performance status", desc: "Performance with CPU & RAM utilization (FGT-PERF-01)" },
+      { cmd: "diagnose sys top 1 1", desc: "Process CPU and memory utilization snapshot / top consumer audit (OPS-SYS-04)" },
       { cmd: "diagnose hardware sysinfo conserve", desc: "Kernel memory conserve mode state and threshold headroom (FGT-MEM-02)" },
       { cmd: "diagnose sys session stat", desc: "Session table count, memory tension drops, and ephemeral port usage (FGT-SESS-01)" },
       { cmd: "get router info bgp summary", desc: "BGP neighbor peering states and prefix counts (FGT-RT-BGP-01)" },
       { cmd: "get router info ospf neighbor", desc: "OSPF neighbor adjacencies and state machine audit (FGT-RT-OSPF-01)" },
       { cmd: "get system ha status", desc: "HA Clustering health and cluster sync (FGT-HA-01)" },
+      { cmd: "diagnose sys ha checksum cluster", desc: "HA cluster configuration checksums and config drift across members (OPS-HA-02)" },
       { cmd: "get system global", desc: "Verify active admin timeout and lockout policy (CIS-ADM-01/02)" },
       { cmd: "get system global | grep -i strong-crypto", desc: "Verify strong crypto runtime configuration (CIS-TLS-01)" },
       { cmd: "get system global | grep -i ssl-min", desc: "Verify minimum TLS protocol version runtime configuration (CIS-TLS-01)" },
@@ -9331,6 +9758,7 @@ const CHEAT_SHEET_GROUPS = [
       { cmd: "get vpn certificate local details", desc: "Local SSL/VPN certificate validity and expiration dates (FGT-CERT-01)" },
       { cmd: "show system interface | grep -i allowaccess", desc: "WAN Interface Access external exposure audit (SEC-INTF-01)" },
       { cmd: "show user local", desc: "Local User MFA verification on password accounts (SEC-USER-01)" },
+      { cmd: "diagnose firewall auth list", desc: "Authenticated firewall user session table and duplicate/stale session audit (SEC-SESS-01)" },
       { cmd: "diagnose user ban list", desc: "Banned IPs in quarantine ban table (FGT-BAN-01)" },
       { cmd: "diagnose test application miglogd 6", desc: "Log Delivery transmission counter to FAZ (FGT-LOG-01)" },
       { cmd: "diagnose debug crashlog read", desc: "Daemon crashlog buffer history and signal analysis (FGT-SYS-03)" },
