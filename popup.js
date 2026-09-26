@@ -6902,8 +6902,8 @@ function checkCisAdmAccountLockout(tokenizer, text) {
       category: "CIS Benchmark",
       source: src,
       data: { threshold: 3, duration: 60 },
-      findingText: "Lockout parameters unset in static backup. FortiOS factory default threshold (3 attempts) is active, but lockout duration (60s) is below the CIS recommended duration (>= 300s).",
-      actionText: "Configure administrator lockout threshold (<= 3 attempts) and extend lockout duration to >= 300 seconds.",
+      findingText: "Lockout parameters unset in static backup. FortiOS factory default threshold (3 attempts) is active, but lockout duration (60s) is below the CIS recommended duration (>= 300s). Captive Portal and SSL-VPN remain vulnerable to rapid brute-force dictionary attacks.",
+      actionText: "Configure administrator lockout threshold (<= 3 attempts) and extend lockout duration to >= 300 seconds to protect VPN and admin interfaces.",
       remediationCli: remCli,
     });
   }
@@ -6919,8 +6919,8 @@ function checkCisAdmAccountLockout(tokenizer, text) {
       category: "CIS Benchmark",
       source: src,
       data: { threshold, duration },
-      findingText: "Administrator account lockout threshold is disabled or unset (threshold: 0 / missing). Brute-force authentication protection is inactive.",
-      actionText: "Enable administrator lockout threshold (<= 3 attempts) and lockout duration (>= 300 seconds) to mitigate brute-force attacks.",
+      findingText: "Account lockout threshold is disabled or unset (threshold: 0 / missing). Administrative interfaces, Captive Portal, and SSL-VPN are fully exposed to brute-force dictionary attacks.",
+      actionText: "Enable lockout threshold (<= 3 attempts) and lockout duration (>= 300 seconds) to mitigate brute-force attacks across all portals.",
       remediationCli: remCli,
     });
   }
@@ -6933,7 +6933,7 @@ function checkCisAdmAccountLockout(tokenizer, text) {
       category: "CIS Benchmark",
       source: src,
       data: { threshold, duration },
-      findingText: `Administrator account lockout parameters are suboptimal (threshold: ${threshold} attempts, duration: ${duration}s). CIS benchmark requires threshold <= 3 attempts and duration >= 300 seconds.`,
+      findingText: `Account lockout parameters are suboptimal (threshold: ${threshold} attempts, duration: ${duration}s). CIS benchmark requires threshold <= 3 attempts and duration >= 300 seconds.`,
       actionText: "Configure administrator lockout threshold (<= 3 attempts) and extend lockout duration to >= 300 seconds.",
       remediationCli: remCli,
     });
@@ -6946,7 +6946,7 @@ function checkCisAdmAccountLockout(tokenizer, text) {
     category: "CIS Benchmark",
     source: src,
     data: { threshold, duration },
-    findingText: `Administrator account lockout is enforced: threshold ${threshold} failed attempt(s), lockout duration ${duration} seconds.`,
+    findingText: `Account lockout is enforced: threshold ${threshold} failed attempt(s), lockout duration ${duration} seconds.`,
     actionText: "",
     remediationCli: "",
   });
@@ -7169,12 +7169,17 @@ function checkCisSysNtpTimezone(tokenizer, text = "") {
  * If section missing in static backup, flag WARN (non-compliant FortiOS default).
  */
 function checkCisAuthPasswordPolicy(tokenizer, text = "") {
-  let status = tokenizer ? (cleanVal(tokenizer.getSystemProperty("system password-policy", "status")) || cleanVal(tokenizer.getSystemProperty("system password-policy", "status-global")) || cleanVal(tokenizer.getProperty("system password-policy", "status")) || cleanVal(tokenizer.getProperty("system password-policy", "status-global"))) : null;
-  let minLengthStr = tokenizer ? (cleanVal(tokenizer.getSystemProperty("system password-policy", "minimum-length")) || cleanVal(tokenizer.getSystemProperty("system password-policy", "min-length")) || cleanVal(tokenizer.getProperty("system password-policy", "minimum-length")) || cleanVal(tokenizer.getProperty("system password-policy", "min-length"))) : null;
-  let minLowerStr = tokenizer ? (cleanVal(tokenizer.getSystemProperty("system password-policy", "min-lower-case-letter")) || cleanVal(tokenizer.getProperty("system password-policy", "min-lower-case-letter"))) : null;
-  let minUpperStr = tokenizer ? (cleanVal(tokenizer.getSystemProperty("system password-policy", "min-upper-case-letter")) || cleanVal(tokenizer.getProperty("system password-policy", "min-upper-case-letter"))) : null;
-  let minNonAlphaStr = tokenizer ? (cleanVal(tokenizer.getSystemProperty("system password-policy", "min-non-alphanumeric")) || cleanVal(tokenizer.getProperty("system password-policy", "min-non-alphanumeric"))) : null;
-  let minNumStr = tokenizer ? (cleanVal(tokenizer.getSystemProperty("system password-policy", "min-number")) || cleanVal(tokenizer.getProperty("system password-policy", "min-number"))) : null;
+  const getProp = (key) => cleanVal(tokenizer ? (tokenizer.getSystemProperty("system password-policy", key) || tokenizer.getProperty("system password-policy", key)) : "");
+  
+  let status = getProp("status") || getProp("status-global");
+  let minLengthStr = getProp("minimum-length") || getProp("min-length");
+  let minLowerStr = getProp("min-lower-case-letter");
+  let minUpperStr = getProp("min-upper-case-letter");
+  let minNonAlphaStr = getProp("min-non-alphanumeric");
+  let minNumStr = getProp("min-number");
+  let mustContain = getProp("must-contain");
+  let reusePwd = getProp("reuse-password");
+  let reusePwdLimit = getProp("reuse-password-limit");
 
   if (!status && text) {
     const m = /config\s+system\s+password-policy[\s\S]*?set\s+(?:status|status-global)\s+(\S+)/i.exec(text);
@@ -7183,6 +7188,10 @@ function checkCisAuthPasswordPolicy(tokenizer, text = "") {
   if (!minLengthStr && text) {
     const m = /config\s+system\s+password-policy[\s\S]*?set\s+(?:minimum-length|min-length)\s+([0-9]+)/i.exec(text);
     if (m) minLengthStr = m[1];
+  }
+  if (!mustContain && text) {
+    const m = /config\s+system\s+password-policy[\s\S]*?set\s+must-contain\s+([^\n]+)/i.exec(text);
+    if (m) mustContain = m[1].trim();
   }
   if (!minLowerStr && text) {
     const m = /config\s+system\s+password-policy[\s\S]*?set\s+min-lower-case-letter\s+([0-9]+)/i.exec(text);
@@ -7200,12 +7209,19 @@ function checkCisAuthPasswordPolicy(tokenizer, text = "") {
     const m = /config\s+system\s+password-policy[\s\S]*?set\s+min-number\s+([0-9]+)/i.exec(text);
     if (m) minNumStr = m[1];
   }
+  if (!reusePwd && text) {
+    const m = /config\s+system\s+password-policy[\s\S]*?set\s+reuse-password\s+(\S+)/i.exec(text);
+    if (m) reusePwd = m[1];
+  }
+  if (!reusePwdLimit && text) {
+    const m = /config\s+system\s+password-policy[\s\S]*?set\s+reuse-password-limit\s+([0-9]+)/i.exec(text);
+    if (m) reusePwdLimit = m[1];
+  }
 
   const hasPwdPolicy = tokenizer ? (!!tokenizer.getSystemSection("system password-policy") || !!tokenizer.getSection("system password-policy")) : /config\s+system\s+password-policy/i.test(text);
   const src = tokenizer ? "conf" : "cli";
-  const remCli = "config system password-policy\n    set status enable\n    set minimum-length 12\n    set min-lower-case-letter 1\n    set min-upper-case-letter 1\n    set min-non-alphanumeric 1\n    set min-number 1\nend";
+  const remCli = "config system password-policy\n    set status enable\n    set minimum-length 12\n    set must-contain lower-case-letter non-alphanumeric number upper-case-letter\n    # Use 'reuse-password disable' for Pre-7.6, or 'reuse-password-limit 3' for 7.6+\n    set reuse-password disable\n    set login-lockout-upon-weaker-encryption enable\nend";
 
-  // If section is missing in configuration or CLI input, return NOT_EVALUATED
   if (!hasPwdPolicy && !status && !minLengthStr) {
     return makeFinding({
       id: "CIS-AUTH-01",
@@ -7221,24 +7237,26 @@ function checkCisAuthPasswordPolicy(tokenizer, text = "") {
   }
 
   const minLength = minLengthStr ? parseInt(minLengthStr, 10) : 0;
-  const minLower = minLowerStr ? parseInt(minLowerStr, 10) : 0;
-  const minUpper = minUpperStr ? parseInt(minUpperStr, 10) : 0;
-  const minNonAlpha = minNonAlphaStr ? parseInt(minNonAlphaStr, 10) : 0;
-  const minNum = minNumStr ? parseInt(minNumStr, 10) : 0;
-
   const isEnabled = status && status.toLowerCase() === "enable";
 
+  // Evaluate Complexity
   const missingComplexity = [];
-  if (minLower < 1) missingComplexity.push("lowercase letters");
-  if (minUpper < 1) missingComplexity.push("uppercase letters");
-  if (minNonAlpha < 1) missingComplexity.push("special characters");
-  if (minNum < 1) missingComplexity.push("numbers");
+  const mcLower = mustContain ? mustContain.toLowerCase() : "";
+  
+  if (!mcLower.includes("lower") && (!minLowerStr || parseInt(minLowerStr, 10) < 1)) missingComplexity.push("lowercase letters");
+  if (!mcLower.includes("upper") && (!minUpperStr || parseInt(minUpperStr, 10) < 1)) missingComplexity.push("uppercase letters");
+  if (!mcLower.includes("non-alpha") && (!minNonAlphaStr || parseInt(minNonAlphaStr, 10) < 1)) missingComplexity.push("special characters");
+  if (!mcLower.includes("number") && (!minNumStr || parseInt(minNumStr, 10) < 1)) missingComplexity.push("numbers");
 
-  if (!isEnabled || minLength < 12 || missingComplexity.length > 0) {
+  // Evaluate Reuse Policy
+  const isReuseProtected = (reusePwd && reusePwd.toLowerCase() === "disable") || (reusePwdLimit && parseInt(reusePwdLimit, 10) >= 3);
+
+  if (!isEnabled || minLength < 12 || missingComplexity.length > 0 || !isReuseProtected) {
     const reasons = [];
     if (!isEnabled) reasons.push("policy status is disabled");
     if (minLength < 12) reasons.push(`minimum length is ${minLength || 0} (<12)`);
     if (missingComplexity.length > 0) reasons.push(`missing complexity enforcement for: ${missingComplexity.join(", ")}`);
+    if (!isReuseProtected) reasons.push("password reuse prevention is disabled/unset");
 
     return makeFinding({
       id: "CIS-AUTH-01",
@@ -7247,8 +7265,8 @@ function checkCisAuthPasswordPolicy(tokenizer, text = "") {
       category: "CIS Benchmark",
       source: src,
       data: { status: status || "disable", minLength, missingComplexity },
-      findingText: `Global administrator password policy is non-compliant (${reasons.join("; ")}). CIS benchmark requires status enabled, minimum length >= 12 characters, and all 4 complexity categories enabled.`,
-      actionText: "Enforce global administrator password policy with minimum length >= 12 characters and character complexity requirements.",
+      findingText: `Global administrator password policy is non-compliant (${reasons.join("; ")}). CIS benchmark requires status enabled, minimum length >= 12 characters, all 4 complexity categories enabled, and password reuse prevention active.`,
+      actionText: "Enforce global administrator password policy with minimum length >= 12 characters, character complexity, and password reuse limits. Enable 'login-lockout-upon-weaker-encryption' to protect against FortiBleed.",
       remediationCli: remCli,
     });
   }
@@ -7259,8 +7277,8 @@ function checkCisAuthPasswordPolicy(tokenizer, text = "") {
     status: "PASS",
     category: "CIS Benchmark",
     source: src,
-    data: { status: "enable", minLength, minLower, minUpper, minNonAlpha, minNum },
-    findingText: `Global password policy enforced: minimum length ${minLength} characters with all 4 complexity categories required (lowercase, uppercase, numbers, non-alphanumeric).`,
+    data: { status: "enable", minLength },
+    findingText: `Global password policy enforced: minimum length ${minLength} characters with full complexity requirements and password reuse prevention active.`,
     actionText: "",
     remediationCli: "",
   });
@@ -9765,6 +9783,23 @@ const CHEAT_SHEET_GROUPS = [
     ],
   },
   {
+    id: "fgt_advanced",
+    label: "FortiGate Advanced Threat Hunting & Diags",
+    bundle: "",
+    items: [
+      { cmd: "get system admin list", desc: "View all active admin GUI/CLI sessions (Hunt for Session Hijacking/Ghost sessions)" },
+      { cmd: "execute disconnect-admin-session <id>", desc: "Surgically terminate an unauthorized or idle admin session by ID" },
+      { cmd: "diagnose wad user list", desc: "View active users authenticated via Web Proxy / ZTNA (WAD daemon)" },
+      { cmd: "diagnose wad user clear", desc: "Clear all active WAD/Proxy user sessions" },
+      { cmd: "diagnose sys session filter clear", desc: "STEP 1: Clear existing session filters before targeting new threats" },
+      { cmd: "diagnose sys session filter src <ip>", desc: "STEP 2: Filter active firewall sessions by Malicious Source IP" },
+      { cmd: "diagnose sys session clear", desc: "STEP 3: Aggressively terminate all sessions matching the current filter (DoS Mitigation)" },
+      { cmd: "diagnose vpn ike log filter rem-addr4 <ip>", desc: "Set IKE debug filter by remote IP (Modern FortiOS 7.4+ syntax)" },
+      { cmd: "diagnose debug application ike -1", desc: "Start IKE Phase 1 debug engine to trace VPN negotiation failures" },
+      { cmd: "get router info bgp neighbors <ip> received-routes", desc: "View actual BGP routes received from a specific peer (after route-map filtering)" },
+    ],
+  },
+  {
     id: "faz",
     label: "FortiAnalyzer Live Health Check Block",
     bundle: [
@@ -9774,18 +9809,28 @@ const CHEAT_SHEET_GROUPS = [
       "diagnose system print df",
       "diagnose log device",
       "diagnose test application oftpd 3",
-      "diagnose fortilogd msgrate",
+      "diagnose fortilogd lograte",
       "diagnose test application sqlplugind 2",
     ].join("\n"),
     items: [
       { cmd: "get system status", desc: "FAZ license validity, system status, and HA mode (FAZ-SYS-01)" },
       { cmd: "get system performance", desc: "CPU and memory utilization excluding swap (FAZ-SYS-01)" },
       { cmd: "get system ha", desc: "FortiAnalyzer HA cluster configuration and status (FAZ-SYS-01)" },
-      { cmd: "diagnose system print df", desc: "Storage Threshold /Storage and /var partitions (FAZ-STOR-01)" },
+      { cmd: "diagnose system print df", desc: "Storage Threshold /Storage and /var partitions, and LVM volumes (FAZ-STOR-01)" },
       { cmd: "diagnose log device", desc: "System storage summary and device log quotas (FAZ-STOR-01)" },
       { cmd: "diagnose test application oftpd 3", desc: "Active connected firewall sessions and idle times (FAZ-CONN-01)" },
-      { cmd: "diagnose fortilogd msgrate", desc: "Log ingestion message rate over last 60 seconds (FAZ-IDX-01)" },
+      { cmd: "diagnose fortilogd lograte", desc: "Real-time log ingestion rate. A continuous '0' indicates a daemon crash." },
       { cmd: "diagnose test application sqlplugind 2", desc: "SQL log insert speed and disk I/O utilization stats (FAZ-IDX-01)" },
+    ],
+  },
+  {
+    id: "faz_advanced",
+    label: "FortiAnalyzer Advanced Diagnostics",
+    bundle: "",
+    items: [
+      { cmd: "diagnose debug application oftpd 8", desc: "Debug OFTP daemon to troubleshoot dropped FortiGate logs, SSL cert errors, or ADOM rejection" },
+      { cmd: "execute lvm info", desc: "Display physical volume and logical volume (LVM) layout prior to expanding VM disk space" },
+      { cmd: "execute log-integrity-check", desc: "Verify log archive integrity if fortilogd crashes or disk corruption is suspected" },
     ],
   },
 ];
@@ -10436,29 +10481,32 @@ function renderCheatsheet() {
     const groupLabel = group.label;
     title.appendChild(document.createTextNode(groupLabel));
 
-    const copyAllBtn = document.createElement("button");
-    copyAllBtn.className = "btn-bundle-copy";
-    copyAllBtn.type = "button";
-    copyAllBtn.innerHTML = `
-      <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor">
-        <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
-        <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 2H9a3 3 0 01-3-2z" />
-      </svg>
-      ${"Copy Verified 1-Click Bundle"}
-    `;
-
-    copyAllBtn.addEventListener("click", async (ev) => {
-      ev.stopPropagation();
-      try {
-        await navigator.clipboard.writeText(group.bundle);
-        showToast(`1-Click ${group.label} copied!`);
-      } catch (err) {
-        showToast("Clipboard copy failed");
-      }
-    });
-
     header.appendChild(title);
-    header.appendChild(copyAllBtn);
+
+    if (group.bundle) {
+      const copyAllBtn = document.createElement("button");
+      copyAllBtn.className = "btn-bundle-copy";
+      copyAllBtn.type = "button";
+      copyAllBtn.innerHTML = `
+        <svg class="btn-icon" viewBox="0 0 20 20" fill="currentColor">
+          <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
+          <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 2H9a3 3 0 01-3-2z" />
+        </svg>
+        ${"Copy Verified 1-Click Bundle"}
+      `;
+
+      copyAllBtn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(group.bundle);
+          showToast(`1-Click ${group.label} copied!`);
+        } catch (err) {
+          showToast("Clipboard copy failed");
+        }
+      });
+
+      header.appendChild(copyAllBtn);
+    }
 
     const list = document.createElement("ul");
     list.className = "cheatsheet-list";
