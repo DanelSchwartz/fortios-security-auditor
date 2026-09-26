@@ -2073,8 +2073,11 @@ function checkFgtIpsecTunnels(text) {
     while ((pm = proxyRe.exec(text)) !== null) {
       const tName = pm[1];
       // Cleanup "0:192.168.10.0/255.255.255.0:0" -> "192.168.10.0/255.255.255.0"
-      const src = pm[2].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
-      const dst = pm[3].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
+      let src = pm[2].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
+      let dst = pm[3].replace(/^(?:0:)?/, "").replace(/:\d+$/, "").trim();
+
+      if (src === "0.0.0.0-255.255.255.255" || src === "0.0.0.0/0.0.0.0") src = "0.0.0.0/0 (Any)";
+      if (dst === "0.0.0.0-255.255.255.255" || dst === "0.0.0.0/0.0.0.0") dst = "0.0.0.0/0 (Any)";
 
       if (tunnelsMap.has(tName)) {
         tunnelsMap.get(tName).deadSelectors.push(`Local: ${src} -> Remote: ${dst}`);
@@ -2098,9 +2101,17 @@ function checkFgtIpsecTunnels(text) {
 
   if (degraded.length) {
     const bullets = degraded.map(t => {
-      let line = `  • Tunnel '${t.name}' (Peer: ${t.peer}) - Selectors: ${t.up}/${t.total} UP`;
+      const peerText = t.peer !== "Unknown" ? ` (Peer: ${t.peer})` : "";
+      let line = `  • Tunnel '${t.name}'${peerText} - Selectors: ${t.up}/${t.total} UP`;
+      
       if (t.deadSelectors.length > 0) {
-        line += `\n    - Dead Selectors Identified:\n` + t.deadSelectors.map(s => `      > ${s} (sa=0)`).join("\n");
+        const formattedSelectors = t.deadSelectors.map(s => {
+          // Clean up ugly FortiOS Any ranges
+          const cleanS = s.replace(/0\.0\.0\.0-255\.255\.255\.255/g, "0.0.0.0/0 (Any)")
+                          .replace(/0\.0\.0\.0\/0\.0\.0\.0/g, "0.0.0.0/0 (Any)");
+          return `  • ↳ [DOWN] ${cleanS}`;
+        }).join("\n");
+        line += `\n${formattedSelectors}`;
       }
       return line;
     }).join("\n");
@@ -7367,7 +7378,6 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
   let strongCrypto = null;
   let sslMinVer = null;
 
-  // 1. Evaluate Static Config (AST / Tokenizer)
   if (tokenizer) {
     strongCrypto = cleanVal(
       tokenizer.getSystemGlobalProperty("strong-crypto") ||
@@ -7385,12 +7395,9 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
     ) || null;
   }
 
-  // 2. Evaluate Runtime CLI Log & Text Fallback
-  // Live CLI output takes precedence over static backup defaults
   if (text) {
-    // Line-anchored match for strong-crypto: matches "strong-crypto : enable" or "set strong-crypto enable"
-    // Strictly anchored to line start to avoid matching the grep command itself
-    const scMatch = /(?:^|\r?\n)\s*(?:set\s+)?strong-crypto\s*[:= ]\s*([a-zA-Z0-9_-]+)/i.exec(text);
+    // FIXED REGEX: Properly handle spaces before and after the colon/equals
+    const scMatch = /(?:^|\r?\n)\s*(?:set\s+)?strong-crypto\s*(?:[:=]\s*|\s+)([a-zA-Z0-9_-]+)/i.exec(text);
     if (scMatch) {
       const detectedVal = cleanVal(scMatch[1]).toLowerCase();
       if (detectedVal === "enable" || detectedVal === "disable") {
@@ -7398,12 +7405,12 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
       }
     }
 
-    // Scoped extraction for ssl-min-proto-version in system global to prevent catching it from vpn ssl
     const globalScopeText = extractSystemGlobalScope(text);
     const searchScope = globalScopeText || text;
 
     if (!sslMinVer) {
-      const cliVerMatch = /(?:^|\r?\n)\s*ssl-min-proto-version\s*[:= ]\s*([a-zA-Z0-9_.-]+)/i.exec(searchScope);
+      // FIXED REGEX: Properly handle spaces before and after the colon/equals
+      const cliVerMatch = /(?:^|\r?\n)\s*(?:set\s+)?(?:ssl-min-proto-version|ssl-min-proto-ver)\s*(?:[:=]\s*|\s+)([a-zA-Z0-9_.-]+)/i.exec(searchScope);
       if (cliVerMatch) {
         sslMinVer = cleanVal(cliVerMatch[1]);
       } else if (globalScopeText) {
@@ -7442,7 +7449,6 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
   const isExplicitLegacyOs = /(?:#config-version=[^:\r\n]*?[-_ ]|[vV]|Version:\s*.*?)([56]\.[0-9]+)/i.test(fullText);
   const isFortiOS7 = !isExplicitLegacyOs;
 
-  // If ssl-min-proto-version is unset on FortiOS 7.x, treat it as factory default TLSv1-2
   const isSslMinVerUnset = !sslMinVer;
   let effectiveTlsVer = sslMinVer;
   if (isSslMinVerUnset && isFortiOS7) {
