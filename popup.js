@@ -2977,51 +2977,60 @@ function checkFazActiveDevices(text) {
 
   if (!rows.length) return null;
 
-  const idleFlags = [];
+  const staleDevices = [];
+  const healthyDevices = [];
+
   for (const r of rows) {
     const idleSec = durationToSeconds(r.idletime);
     if (idleSec !== null && idleSec >= THRESHOLDS.fazIdleWarnSeconds) {
-      idleFlags.push(`${r.hostname} (${r.device}) idle ${secondsToHuman(idleSec)}`);
+      staleDevices.push(`  • ${r.hostname || r.device} (${r.ip}) - Idle for: ${secondsToHuman(idleSec)}`);
+    } else {
+      healthyDevices.push(r);
     }
   }
 
   const deviceListMatch = /--- There are currently (\d+) devices\/vdoms managed ---/i.exec(text);
   const expectedCount = deviceListMatch ? parseInt(deviceListMatch[1], 10) : null;
 
-  const summary = `${rows.length} managed firewall(s) connected via OFTP: ${rows
-    .map((r) => `${r.hostname} (idle: ${r.idletime || "0s"})`)
-    .join(", ")}.`;
+  if (staleDevices.length > 0) {
+    let findingLines = [
+      `High idle time (>= 60s) detected on ${staleDevices.length} managed firewall(s):`,
+      ...staleDevices
+    ];
 
-  if (idleFlags.length) {
-    return makeFinding(
-      "FAZ-CONN-01",
-      "FortiAnalyzer Device Connectivity",
-      "WARN",
-      `${summary} High idle time (>= 60s) detected on: ${idleFlags.join("; ")}.`,
-      "Inspect network stability and firewall miglogd process for the affected units to prevent disconnected logging sessions.",
-      "cli"
-    );
+    if (healthyDevices.length > 0) {
+      findingLines.push(`\nNote: ${healthyDevices.length} other device(s) are connected and actively streaming logs (idle < 60s).`);
+    }
+
+    return makeFinding({
+      id: "FAZ-CONN-01",
+      component: "FortiAnalyzer Device Connectivity",
+      status: "WARN",
+      findingText: findingLines.join("\n"),
+      actionText: "Inspect network stability, OFTP SSL connectivity (TCP 514), and firewall miglogd process for the affected units to prevent log loss.",
+      source: "cli"
+    });
   }
 
   if (expectedCount !== null && rows.length < expectedCount) {
-    return makeFinding(
-      "FAZ-CONN-01",
-      "FortiAnalyzer Device Connectivity",
-      "WARN",
-      `${expectedCount} devices managed in DVM, but only ${rows.length} active sessions present in OFTP table.`,
-      "Identify disconnected FortiGate units and verify TCP port 514 / OFTP SSL connectivity.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FAZ-CONN-01",
+      component: "FortiAnalyzer Device Connectivity",
+      status: "WARN",
+      findingText: `${expectedCount} devices are managed in DVM, but only ${rows.length} active sessions are present in the OFTP table. Devices may be offline or disconnected.`,
+      actionText: "Identify disconnected FortiGate units and verify TCP port 514 / OFTP SSL connectivity.",
+      source: "cli"
+    });
   }
 
-  return makeFinding(
-    "FAZ-CONN-01",
-    "FortiAnalyzer Device Connectivity",
-    "PASS",
-    `All ${rows.length} managed firewalls active with low idle times (< 60s). Log streaming healthy.`,
-    "",
-    "cli"
-  );
+  return makeFinding({
+    id: "FAZ-CONN-01",
+    component: "FortiAnalyzer Device Connectivity",
+    status: "PASS",
+    findingText: `All ${rows.length} managed firewalls are active with low idle times (< 60s). Log streaming is healthy.`,
+    actionText: "",
+    source: "cli"
+  });
 }
 
 /**
@@ -3093,9 +3102,11 @@ function checkFazSysPerformanceHa(text) {
 function checkFazIndexingPipeline(text) {
   if (
     !hasCommand(text, "diagnose fortilogd msgrate") &&
+    !hasCommand(text, "diagnose fortilogd lograte") &&
     !hasCommand(text, "diagnose test application sqlplugind 2") &&
     !/Log insert speed:/i.test(text) &&
-    !/msgrate/i.test(text)
+    !/msgrate/i.test(text) &&
+    !/lograte/i.test(text)
   ) {
     return null;
   }
@@ -3110,12 +3121,8 @@ function checkFazIndexingPipeline(text) {
   const insertMatch = /logs\/60sec:\s*([\d.]+)/i.exec(text) || /insert speed[^\n]*?:\s*([\d.]+)/i.exec(text);
   let insert_rate = 0;
   if (insertMatch) {
-    const rawVal = parseFloat(insertMatch[1]);
-    if (/logs\/60sec:/i.test(insertMatch[0])) {
-      insert_rate = Math.round((rawVal / 60) * 10) / 10;
-    } else {
-      insert_rate = rawVal;
-    }
+    // Fortinet's 'logs/60sec: X' value is ALREADY logs per second. Do not divide by 60.
+    insert_rate = parseFloat(insertMatch[1]);
   }
 
   const ioMatch = /io-utils:\s*(\d+)%/i.exec(text) || /io_utils[^\n]*?:\s*(\d+)%/i.exec(text);
@@ -3124,12 +3131,7 @@ function checkFazIndexingPipeline(text) {
   const ratioVal = ingest_rate > 0 ? (insert_rate / ingest_rate) : (insert_rate > 0 ? 1.0 : 1.0);
   const ratio = Math.round(ratioVal * 100);
 
-  const data = {
-    ingest_rate,
-    insert_rate,
-    ratio,
-    io_utils
-  };
+  const data = { ingest_rate, insert_rate, ratio, io_utils };
 
   const observedBullets = [
     `  • Ingestion Rate: ${ingest_rate} logs/s (incoming from firewalls)`,
@@ -3148,19 +3150,15 @@ function checkFazIndexingPipeline(text) {
 
   if (isStalled || isSevereLag || isDiskCritical) {
     let reason = "";
-    if (isStalled) {
-      reason = "SQL indexing pipeline is stalled (0 logs/s indexed to database).";
-    } else if (isDiskCritical) {
-      reason = `Critical disk I/O saturation on database storage (${io_utils}% >= 95%).`;
-    } else {
-      reason = `Severe indexing backlog (ratio ${ratio}% < 50%).`;
-    }
+    if (isStalled) reason = "SQL indexing pipeline is stalled (0 logs/s indexed to database).";
+    else if (isDiskCritical) reason = `Critical disk I/O saturation on database storage (${io_utils}% >= 95%).`;
+    else reason = `Severe indexing backlog (ratio ${ratio}% < 50%).`;
 
     return makeFinding({
       id: "FAZ-IDX-01",
       component: "SQL Log Indexing Pipeline",
       status: "FAIL",
-      findingText: `FortiAnalyzer SQL indexing pipeline failure: ${reason}\n${observedBullets}\n\nRoot Cause & Meaning: ${rootCause}\nHealthy Baseline: ${healthyBaseline}`,
+      findingText: `FortiAnalyzer SQL indexing pipeline failure: ${reason}\n\n${observedBullets}\n\nRoot Cause & Meaning: ${rootCause}\nHealthy Baseline: ${healthyBaseline}`,
       actionText: triageAction,
       source: "cli",
       data
@@ -3172,17 +3170,14 @@ function checkFazIndexingPipeline(text) {
 
   if (isModerateLag || isDiskWarn) {
     let reason = "";
-    if (isDiskWarn) {
-      reason = `Elevated disk I/O utilization on database storage (${io_utils}%).`;
-    } else {
-      reason = `Moderate SQL indexing lag (ratio ${ratio}%).`;
-    }
+    if (isDiskWarn) reason = `Elevated disk I/O utilization on database storage (${io_utils}%).`;
+    else reason = `Moderate SQL indexing lag (ratio ${ratio}%).`;
 
     return makeFinding({
       id: "FAZ-IDX-01",
       component: "SQL Log Indexing Pipeline",
       status: "WARN",
-      findingText: `FortiAnalyzer log processing bottleneck: ${reason}\n${observedBullets}\n\nRoot Cause & Meaning: ${rootCause}\nHealthy Baseline: ${healthyBaseline}`,
+      findingText: `FortiAnalyzer log processing bottleneck: ${reason}\n\n${observedBullets}\n\nRoot Cause & Meaning: ${rootCause}\nHealthy Baseline: ${healthyBaseline}`,
       actionText: triageAction,
       source: "cli",
       data
@@ -3193,7 +3188,7 @@ function checkFazIndexingPipeline(text) {
     id: "FAZ-IDX-01",
     component: "SQL Log Indexing Pipeline",
     status: "PASS",
-    findingText: `FortiAnalyzer log indexing pipeline is operating efficiently with real-time database insertion:\n${observedBullets}\n\nHealthy Baseline: ${healthyBaseline}`,
+    findingText: `FortiAnalyzer log indexing pipeline is operating efficiently with real-time database insertion:\n\n${observedBullets}\n\nHealthy Baseline: ${healthyBaseline}`,
     actionText: "",
     source: "cli",
     data
@@ -4252,23 +4247,35 @@ function checkSecAuthSessions(text) {
   const remList = [];
 
   if (duplicateUsers.length > 0) {
-    for (const u of duplicateUsers) {
-      findingsList.push(
-        `User '${u.username}' has ${u.ips.length} concurrent authenticated sessions from different source IPs in this capture: ${u.ips.join(", ")}. This can indicate shared credentials, a VPN client reconnect that left a stale entry, or legitimate multi-device use — cross-check session start times and known user devices before treating this as an incident.`
-      );
-    }
+    const dupLines = duplicateUsers.map(
+      (u) => `  • User '${u.username}': ${u.ips.length} sessions (${u.ips.join(", ")})`
+    );
+    findingsList.push(
+      `Concurrent authenticated sessions detected across multiple source IPs for ${duplicateUsers.length} user(s):\n${dupLines.join("\n")}\nThis can indicate shared credentials, a VPN client reconnect that left a stale entry, or legitimate multi-device use — cross-check session start times and known user devices before treating this as an incident.`
+    );
     actionList.push(
       "Cross-check session start times and known user devices before treating concurrent sessions as an incident. If unauthorized, verify VPN reconnection logs."
     );
   }
 
   if (staleSessions.length > 0) {
+    const staleUserMap = new Map();
     for (const s of staleSessions) {
-      findingsList.push(
-        `Session for '${s.username}' from ${s.srcip} shows expire=${s.expire} (already timed out) but is still present in the active session table. This typically indicates a session cleanup/GC delay on the device rather than a security event — if it persists across repeated checks, consider 'diagnose firewall auth filter user ${s.username}' followed by 'diagnose firewall auth clear' to force a clean re-authentication.`
-      );
-      remList.push(`diagnose firewall auth filter user ${s.username}\ndiagnose firewall auth clear`);
+      if (!staleUserMap.has(s.username)) {
+        staleUserMap.set(s.username, []);
+      }
+      staleUserMap.get(s.username).push(`${s.srcip} (expire=${s.expire})`);
     }
+
+    const staleLines = [];
+    for (const [uname, details] of staleUserMap.entries()) {
+      staleLines.push(`  • User '${uname}': ${details.join(", ")}`);
+      remList.push(`diagnose firewall auth filter user ${uname}\ndiagnose firewall auth clear`);
+    }
+
+    findingsList.push(
+      `Stale/expired session entries (expire <= 0) still present in active session table for ${staleUserMap.size} user(s):\n${staleLines.join("\n")}\nThis typically indicates a session cleanup/GC delay on the device rather than a security event — if it persists across repeated checks, filter and clear the session via CLI to force a clean re-authentication.`
+    );
     actionList.push(
       "If stale/expired session entries persist across repeated checks, filter and clear the session via CLI: diagnose firewall auth filter user <username> followed by diagnose firewall auth clear."
     );
@@ -4283,7 +4290,7 @@ function checkSecAuthSessions(text) {
       data,
       findingText: findingsList.join("\n\n"),
       actionText: actionList.join(" "),
-      remediationCli: remList.join("\n"),
+      remediationCli: [...new Set(remList)].join("\n"),
       diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-SESS-01"] || "diagnose firewall auth list",
       targetConfig: "diagnose firewall auth list"
     });
@@ -6122,6 +6129,28 @@ function classifyVpnSourceEntity(token, addrMap) {
   };
 }
 
+function formatStaticIpList(list, max = 5) {
+  if (!list || list.length === 0) return "";
+  const unique = [...new Set(list)];
+  if (unique.length <= max) {
+    return unique.join(", ");
+  }
+  const shown = unique.slice(0, max).join(", ");
+  const remaining = unique.length - max;
+  return `${shown}... (+${remaining} more)`;
+}
+
+function formatTokenList(list, max = 5) {
+  if (!list || list.length === 0) return "";
+  const unique = [...new Set(list)];
+  if (unique.length <= max) {
+    return unique.join(", ");
+  }
+  const shown = unique.slice(0, max).join(", ");
+  const remaining = unique.length - max;
+  return `${shown}... (+${remaining} more)`;
+}
+
 function buildSecVpn01ObservedState({
   configStatus,
   geoObjectsList,
@@ -6130,7 +6159,10 @@ function buildSecVpn01ObservedState({
   riskAssessment,
   additionalBullets = [],
 }) {
-  const geoObjStr = geoObjectsList && geoObjectsList.length > 0 ? geoObjectsList.join(", ") : "None";
+  const cleanGeoObjects = geoObjectsList && geoObjectsList.length > 0
+    ? [...new Set(geoObjectsList.map((g) => (typeof g === "string" ? g.trim() : g)).filter(Boolean))]
+    : [];
+  const geoObjStr = cleanGeoObjects.length > 0 ? cleanGeoObjects.join(", ") : "None";
   const riskStr = (geoBypassRisk === "None" || geoBypassRisk === "Low")
     ? "None - Gateway strictly constrained to authorized domestic IP space"
     : "High - Unrestricted internet access";
@@ -6498,9 +6530,9 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
 
     // Subcase 4A: Only Non-Geo IP Ranges/Subnets Configured (Zero Geo-Objects)
     if (geoEntities.length === 0 && staticIpEntities.length > 0) {
-      const subnetStr = staticIpList.join(", ");
+      const subnetStr = formatStaticIpList(staticIpList, 5);
       const findingText = buildSecVpn01ObservedState({
-        configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+        configStatus: `Bound to specific address objects (${formatTokenList(allTokens, 5)})`,
         geoObjectsList: [],
         allowedCountriesStr: `Static Subnets Only (Non-geographic: ${subnetStr}) - Geo-Fencing not enforced`,
         geoBypassRisk: "High",
@@ -6557,13 +6589,13 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       const bullets = [];
       if (highRiskCountryNames.length > 0) bullets.push(`High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
       if (additionalForeignCountryNames.length > 0) bullets.push(`Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
-      if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
+      if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${formatStaticIpList(staticIpList, 5)}`);
       bullets.push(`Exposing Firewall Policies: ${exposingPolStr}`);
       bullets.push("Destination & Scope: dstaddr 'all' | service: ALL (Full internal network access)");
       bullets.push("Impact: Direct compromise vector from foreign IP space into entire corporate network.");
 
       const findingText = buildSecVpn01ObservedState({
-        configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+        configStatus: `Bound to specific address objects (${formatTokenList(allTokens, 5)})`,
         geoObjectsList,
         allowedCountriesStr: allAllowedCountriesList.join(", "),
         geoBypassRisk: "High",
@@ -6602,13 +6634,13 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
         const bullets = [];
         if (highRiskCountryNames.length > 0) bullets.push(`High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
         if (additionalForeignCountryNames.length > 0) bullets.push(`Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
-        if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
+        if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${formatStaticIpList(staticIpList, 5)}`);
         bullets.push(`Expired Firewall Policy: Policy ID ${expiredPolIds} with EXPIRED schedule [${expiredSchedNames}] (Expired: ${expiredDates})`);
         bullets.push("Traffic Status: Firewall blocks internal traffic (schedule expired), but VPN gateway still accepts external handshakes.");
         bullets.push(`SecOps Review: Confirm employee has concluded travel. Remove obsolete foreign country from SSL-VPN source-address and delete/archive expired policy ID [${expiredPolIds}] (Checklist ID 13).`);
 
         const findingText = buildSecVpn01ObservedState({
-          configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+          configStatus: `Bound to specific address objects (${formatTokenList(allTokens, 5)})`,
           geoObjectsList,
           allowedCountriesStr: allAllowedCountriesList.join(", "),
           geoBypassRisk: "High",
@@ -6642,13 +6674,13 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
         const bullets = [];
         if (highRiskCountryNames.length > 0) bullets.push(`High-Risk Origins: ${highRiskCountryNames.join(", ")}`);
         if (additionalForeignCountryNames.length > 0) bullets.push(`Additional Foreign Origins: ${additionalForeignCountryNames.join(", ")}`);
-        if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
+        if (staticIpList.length > 0) bullets.push(`Configured Static IPs/Hosts: ${formatStaticIpList(staticIpList, 5)}`);
         bullets.push(`Disabled Firewall Policy: Policy ID ${disabledPolIds} (Status: disabled)`);
         bullets.push("Traffic Status: Firewall blocks internal traffic (policy disabled), but VPN gateway still accepts external handshakes.");
         bullets.push(`SecOps Review: Confirm employee has concluded travel. Remove obsolete foreign country from SSL-VPN source-address and delete/archive disabled policy ID [${disabledPolIds}] (Checklist ID 13).`);
 
         const findingText = buildSecVpn01ObservedState({
-          configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+          configStatus: `Bound to specific address objects (${formatTokenList(allTokens, 5)})`,
           geoObjectsList,
           allowedCountriesStr: allAllowedCountriesList.join(", "),
           geoBypassRisk: "High",
@@ -6696,12 +6728,12 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
         bullets.push(`Heuristic Suspect Objects (${heuristicSuspectNames.length}): ${heuristicSuspectNames.join(", ")}`);
         bullets.push("Operational Review: Name pattern matched country heuristic. Verify if object represents internal subnet or intended foreign access.");
       }
-      if (staticIpList.length > 0) bullets.push(`Static Objects / IPs: ${staticIpList.join(", ")}`);
+      if (staticIpList.length > 0) bullets.push(`Static Objects / IPs: ${formatStaticIpList(staticIpList, 5)}`);
       bullets.push(...polSummaryLines);
       bullets.push("SecOps Review: Audit foreign origins against client authorized travel list (Checklist Item 13).");
 
       const findingText = buildSecVpn01ObservedState({
-        configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+        configStatus: `Bound to specific address objects (${formatTokenList(allTokens, 5)})`,
         geoObjectsList,
         allowedCountriesStr: allAllowedCountriesList.join(", "),
         geoBypassRisk: "High",
@@ -6735,12 +6767,12 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
     const domesticListStr = domesticEntities.length ? [...new Set(domesticEntities.map((d) => d.token))].join(", ") : "Israel";
     const bullets = [];
     if (staticIpList.length > 0) {
-      bullets.push(`Configured Static IPs/Hosts: ${staticIpList.join(", ")}`);
+      bullets.push(`Configured Static IPs/Hosts: ${formatStaticIpList(staticIpList, 5)}`);
     }
     bullets.push("Foreign Access: Zero foreign countries allowed (restricted strictly to domestic Israel baseline).");
 
     const findingText = buildSecVpn01ObservedState({
-      configStatus: `Bound to specific address objects (${allTokens.join(", ")})`,
+      configStatus: `Bound to specific address objects (${formatTokenList(allTokens, 5)})`,
       geoObjectsList,
       allowedCountriesStr: domesticGeoList.length ? domesticGeoList.join(", ") : "Israel (IL)",
       geoBypassRisk: "None",
@@ -7840,39 +7872,52 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
   let strongCrypto = null;
   let sslMinVer = null;
 
-  if (tokenizer) {
-    strongCrypto = cleanVal(
-      tokenizer.getSystemGlobalProperty("strong-crypto") ||
-      tokenizer.getProperty("system global", "strong-crypto", "global") ||
-      tokenizer.getProperty("system global", "strong-crypto") || ""
-    ) || null;
-
-    sslMinVer = cleanVal(
-      tokenizer.getSystemGlobalProperty("ssl-min-proto-version") ||
-      tokenizer.getSystemGlobalProperty("ssl-min-proto-ver") ||
-      tokenizer.getProperty("system global", "ssl-min-proto-version", "global") ||
-      tokenizer.getProperty("system global", "ssl-min-proto-ver", "global") ||
-      tokenizer.getProperty("system global", "ssl-min-proto-version") ||
-      tokenizer.getProperty("system global", "ssl-min-proto-ver") || ""
-    ) || null;
-  }
-
+  // 1. Prioritize CLI output over tokenizer
   if (text) {
-    // STRICT HORIZONTAL MATCH: Uses space, tab, and non-breaking space (\xA0) to prevent newline traversal.
-    const scMatches = [...text.matchAll(/\bstrong-crypto(?:[ \t\xA0]*[:=][ \t\xA0]*|[ \t\xA0]+)(enable|disable)\b/gi)];
-    if (scMatches.length > 0) {
-      // Take the last match to allow the actual output to override any potential command-line artifacts
-      strongCrypto = cleanVal(scMatches[scMatches.length - 1][1]).toLowerCase();
-    }
-
     const globalScopeText = extractSystemGlobalScope(text);
     const searchScope = globalScopeText || text;
+    const lines = searchScope.split(/\r?\n/);
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      // Skip the CLI command invocation itself (e.g. grep, get, show commands)
+      if (/grep\b/i.test(line) || /^[#$]\s*(?:get|show)/i.test(line)) {
+        continue;
+      }
+
+      // Match strong-crypto using strict horizontal whitespace [^\S\r\n]
+      const scMatch = /\bstrong-crypto[^\S\r\n]*[:=]?[^\S\r\n]*(enable|disable)\b/i.exec(rawLine);
+      if (scMatch) {
+        strongCrypto = cleanVal(scMatch[1]).toLowerCase();
+      }
+
+      // Match ssl-min-proto-version / ssl-min-proto-ver
+      const sslMatch = /\b(?:ssl-min-proto-version|ssl-min-proto-ver)[^\S\r\n]*[:=]?[^\S\r\n]*([a-zA-Z0-9_.-]+)\b/i.exec(rawLine);
+      if (sslMatch) {
+        sslMinVer = cleanVal(sslMatch[1]);
+      }
+    }
+  }
+
+  // 2. Fall back to tokenizer if not extracted from CLI text
+  if (tokenizer) {
+    if (!strongCrypto) {
+      strongCrypto = cleanVal(
+        tokenizer.getSystemGlobalProperty("strong-crypto") ||
+        tokenizer.getProperty("system global", "strong-crypto", "global") ||
+        tokenizer.getProperty("system global", "strong-crypto") || ""
+      ) || null;
+    }
 
     if (!sslMinVer) {
-      const cliVerMatches = [...searchScope.matchAll(/\b(?:ssl-min-proto-version|ssl-min-proto-ver)(?:[ \t\xA0]*[:=][ \t\xA0]*|[ \t\xA0]+)([a-zA-Z0-9_.-]+)\b/gi)];
-      if (cliVerMatches.length > 0) {
-        sslMinVer = cleanVal(cliVerMatches[cliVerMatches.length - 1][1]);
-      }
+      sslMinVer = cleanVal(
+        tokenizer.getSystemGlobalProperty("ssl-min-proto-version") ||
+        tokenizer.getSystemGlobalProperty("ssl-min-proto-ver") ||
+        tokenizer.getProperty("system global", "ssl-min-proto-version", "global") ||
+        tokenizer.getProperty("system global", "ssl-min-proto-ver", "global") ||
+        tokenizer.getProperty("system global", "ssl-min-proto-version") ||
+        tokenizer.getProperty("system global", "ssl-min-proto-ver") || ""
+      ) || null;
     }
   }
 
@@ -8453,10 +8498,15 @@ function extractDeviceMetadata(findings = [], kind = "conf", text = "") {
   }
 
   const resolvedName = hostname || "FortiGate-Appliance";
+  const rawFirmware = firmware || "FortiOS 7.x (Hardening Baseline)";
+  const cleanVerMatch = /(\d+\.\d+(?:\.\d+)?)/.exec(rawFirmware);
+  const cleanVersion = cleanVerMatch ? cleanVerMatch[1] : "";
+
   return {
     hostname: resolvedName,
     appliance: resolvedName,
-    firmware: firmware || "FortiOS 7.x (Hardening Baseline)",
+    firmware: rawFirmware,
+    cleanVersion,
     serial: serial || "Not Disclosed (Static Config)",
     auditorEngine: "SecOps Security Engine v3.2",
     auditTimestamp: new Date().toISOString().replace("T", " ").substring(0, 19) + " UTC",
@@ -8599,7 +8649,7 @@ function generateRichTextHtml(findings, kind, options = {}) {
   const warnCount = activeFindings.filter((f) => f.status === "WARN").length;
   const failCount = activeFindings.filter((f) => f.status === "FAIL").length;
 
-  const metadata = extractDeviceMetadata(findings, kind, options.rawText || "");
+  const metadata = options.metadata || extractDeviceMetadata(findings, kind, options.rawText || "");
 
   const scopeMap = {
     fgt: "FortiGate Live CLI Diagnostics",
@@ -8638,7 +8688,7 @@ function generateRichTextHtml(findings, kind, options = {}) {
       <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 20%;">${"Hostname:"}</td>
       <td style="padding: 6px 10px; border: 1px solid #e2e8f0; color: #0f172a; font-weight: 600; width: 30%;">${escapeHtml(metadata.hostname)}</td>
       <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 20%;">${"Firmware / Build:"}</td>
-      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; color: #0f172a; width: 30%;">${escapeHtml(metadata.firmware)}</td>
+      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; color: #0f172a; width: 30%;">${escapeHtml(metadata.firmware)}${metadata.cleanVersion ? ` <a href="https://www.fortiguard.com/search?q=FortiOS+${metadata.cleanVersion}&engine=8" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline; font-size: 11px; margin-left: 4px;">[PSIRT]</a>` : ""}</td>
     </tr>
     <tr>
       <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569;">${"Serial Number:"}</td>
@@ -9022,7 +9072,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
   const passes = activeFindings.filter((f) => f.status === "PASS");
   const infos = activeFindings.filter((f) => f.status === "INFO");
 
-  const metadata = extractDeviceMetadata(findings, kind, options.rawText || "");
+  const metadata = options.metadata || extractDeviceMetadata(findings, kind, options.rawText || "");
 
   const scopeMapEn = {
     fgt: "FortiGate Live CLI Diagnostics",
@@ -9614,7 +9664,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
           <th>${"Device Hostname"}</th>
           <td><strong>${escapeHtml(metadata.hostname)}</strong></td>
           <th>${"Firmware Build"}</th>
-          <td>${escapeHtml(metadata.firmware)}</td>
+          <td>${escapeHtml(metadata.firmware)}${metadata.cleanVersion ? ` <a href="https://www.fortiguard.com/search?q=FortiOS+${metadata.cleanVersion}&engine=8" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline; font-size: 11px; margin-left: 4px;">[PSIRT]</a>` : ""}</td>
         </tr>
         <tr>
           <th>${"Serial Number"}</th>
