@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FortiOS Security & Hardening Auditor",
-  "version": "1.0.0",
+  "version": "3.5.0",
   "description": "Open-source FortiOS & FortiAnalyzer configuration hardening auditor, CIS compliance benchmark validator, and runtime diagnostic inspector.",
   "action": {
     "default_popup": "popup.html",
