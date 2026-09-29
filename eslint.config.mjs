@@ -20,10 +20,13 @@ export default [
         TextEncoder: "readonly",
         Uint8Array: "readonly",
         ClipboardItem: "readonly",
+        chrome: "readonly",
       },
     },
     rules: {
       "no-undef": "error",
+      "no-useless-escape": "error",
+      "no-unused-vars": ["warn", { "args": "none", "caughtErrors": "none", "varsIgnorePattern": "^(renderFinding|generate|check|run|setLanguage)" }],
     },
   },
 ];
