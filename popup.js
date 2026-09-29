@@ -62,19 +62,14 @@ function normalizeApplianceName(rawName, fallback = "Primary-FW") {
   if (!rawName || typeof rawName !== "string") {
     return (fallback !== undefined && fallback !== "default" && fallback !== ":") ? fallback : "Primary-FW";
   }
-  let clean = rawName.trim().replace(/^["'\s:=]+|["'\s:=]+$/g, "").trim();
+  let clean = rawName.trim().replace(/^["'\s:=]+|["'\s:=#$]+$/g, "").trim();
   clean = clean.replace(/^[:\s]+|[:\s]+$/g, "").trim();
 
   if (!clean || clean === ":" || clean === "::" || clean.toLowerCase() === "default") {
     return (fallback !== undefined && fallback !== "default" && fallback !== ":") ? fallback : "Primary-FW";
   }
 
-  const m = /\b(?:FGT-[A-Za-z0-9_-]+|[A-Z0-9]+(?:-[A-Z0-9]+)*)\b/i.exec(clean);
-  if (m && m[0]) {
-    return m[0];
-  }
-
-  return clean || ((fallback !== undefined && fallback !== "default" && fallback !== ":") ? fallback : "Primary-FW");
+  return clean;
 }
 
 function extractDeviceIdentity(text, defaultName = "Primary-FW") {
@@ -244,8 +239,22 @@ function makeFinding(optionsOrId, ...args) {
     const status = args[1] || "INFO";
     const findingText = args[2] || "";
     const actionText = args[3] || "";
-    const source = args[4] || "cli";
-    const targetConfig = args[5] || "";
+    let remediationCli = "";
+    let category = "";
+    let source = "cli";
+    let targetConfig = "";
+
+    if (args.length >= 6) {
+      // Positional with 8 arguments: (id, component, status, findingText, actionText, remCli, category, source)
+      remediationCli = args[4] || "";
+      category = args[5] || "";
+      source = args[6] || "cli";
+      targetConfig = args[7] || "";
+    } else {
+      // Positional with <= 5 arguments: (id, component, status, findingText, actionText, source, targetConfig)
+      source = args[4] || "cli";
+      targetConfig = args[5] || "";
+    }
 
     const mappedAltId = (
       id === "SEC-LIFE-01" ? "SEC-CRIT-03" :
@@ -269,7 +278,7 @@ function makeFinding(optionsOrId, ...args) {
       altId: mappedAltId,
       component,
       status,
-      category: id.startsWith("CIS-") ? "CIS Benchmark" : (id.startsWith("SEC-") ? "Security & Hardening" : "SecOps Operational"),
+      category: category || (id.startsWith("CIS-") ? "CIS Benchmark" : (id.startsWith("SEC-") ? "Security & Hardening" : "SecOps Operational")),
       source,
       deviceId: "Primary-FW",
       deviceName: "Primary-FW",
@@ -277,7 +286,7 @@ function makeFinding(optionsOrId, ...args) {
       diagnosticCmd: DIAGNOSTIC_COMMANDS[id] || (mappedAltId ? DIAGNOSTIC_COMMANDS[mappedAltId] : "") || "",
       targetConfig: targetConfig || getFindingTargetConfig({ id }),
       data: {},
-      remediationCli: "",
+      remediationCli: remediationCli || "",
       actionText: actionText || "",
       findingText: findingText || ""
     };
@@ -1907,14 +1916,14 @@ function checkFgtHaStatus(text) {
   // Handle standalone mode gracefully if present
   const modeMatch = /Mode:\s*([A-Za-z0-9_-]+)/i.exec(text);
   if (modeMatch && modeMatch[1].toLowerCase() === "standalone") {
-    return makeFinding(
-      "FGT-HA-01",
-      "FortiGate HA Clustering",
-      "INFO",
-      "Device is operating in Standalone mode (HA is not configured).",
-      "",
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-HA-01",
+      component: "FortiGate HA Clustering",
+      status: "INFO",
+      findingText: "Device is operating in Standalone mode (HA is not configured).",
+      actionText: "",
+      source: "cli",
+    });
   }
 
   // Flexible regex handling multiple spaces, non-breaking spaces (\u00A0), and optional spacing before ':'
@@ -1935,24 +1944,24 @@ function checkFgtHaStatus(text) {
       reason = `HA Health Status is "${health}"`;
     }
 
-    return makeFinding(
-      "FGT-HA-01",
-      "FortiGate HA Clustering",
-      "FAIL",
-      `HA cluster desynchronization or failure: ${reason}${hasOutOfSync && health && health.toLowerCase() === "ok" ? " (members reporting out-of-sync)" : ""}.`,
-      "Run 'diagnose sys ha checksum show' on each cluster node to isolate the mismatched configuration blocks, then re-sync cluster configuration.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-HA-01",
+      component: "FortiGate HA Clustering",
+      status: "FAIL",
+      findingText: `HA cluster desynchronization or failure: ${reason}${hasOutOfSync && health && health.toLowerCase() === "ok" ? " (members reporting out-of-sync)" : ""}.`,
+      actionText: "Run 'diagnose sys ha checksum show' on each cluster node to isolate the mismatched configuration blocks, then re-sync cluster configuration.",
+      source: "cli",
+    });
   }
 
-  return makeFinding(
-    "FGT-HA-01",
-    "FortiGate HA Clustering",
-    "PASS",
-    "HA cluster is operational and healthy: Health Status is OK and all cluster members report in-sync.",
-    "",
-    "cli"
-  );
+  return makeFinding({
+    id: "FGT-HA-01",
+    component: "FortiGate HA Clustering",
+    status: "PASS",
+    findingText: "HA cluster is operational and healthy: Health Status is OK and all cluster members report in-sync.",
+    actionText: "",
+    source: "cli",
+  });
 }
 
 /**
@@ -1975,14 +1984,14 @@ function checkFgtFortiGuardSync(text) {
     /Last successful[^\n:]*:\s*([^\n]+)/i.exec(text);
 
   if (available === "unavailable") {
-    return makeFinding(
-      "FGT-FG-01",
-      "FortiGuard Sync",
-      "FAIL",
-      "FDN availability reported as 'unavailable' — FortiGate is unable to communicate with FortiGuard servers for signature/definition updates.",
-      "Check DNS and egress ports (UDP/TCP 8888, 443). Refer to Fortinet Community KB and update client if unresolved.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-FG-01",
+      component: "FortiGuard Sync",
+      status: "FAIL",
+      findingText: "FDN availability reported as 'unavailable' — FortiGate is unable to communicate with FortiGuard servers for signature/definition updates.",
+      actionText: "Check DNS and egress ports (UDP/TCP 8888, 443). Refer to Fortinet Community KB and update client if unresolved.",
+      source: "cli",
+    });
   }
 
   if (lastUpdateMatch) {
@@ -1991,37 +2000,37 @@ function checkFgtFortiGuardSync(text) {
     if (!Number.isNaN(parsedDate.getTime())) {
       const ageHours = (Date.now() - parsedDate.getTime()) / 3600000;
       if (ageHours > THRESHOLDS.fdnStaleHours) {
-        return makeFinding(
-          "FGT-FG-01",
-          "FortiGuard Sync",
-          "FAIL",
-          `Last successful FortiGuard sync was ${rawDate} (~${Math.round(ageHours)}h ago), exceeding the ${THRESHOLDS.fdnStaleHours}h freshness threshold.`,
-          "Check DNS and egress ports (UDP/TCP 8888, 443). Refer to Fortinet Community KB and update client if unresolved.",
-          "cli"
-        );
+        return makeFinding({
+          id: "FGT-FG-01",
+          component: "FortiGuard Sync",
+          status: "FAIL",
+          findingText: `Last successful FortiGuard sync was ${rawDate} (~${Math.round(ageHours)}h ago), exceeding the ${THRESHOLDS.fdnStaleHours}h freshness threshold.`,
+          actionText: "Check DNS and egress ports (UDP/TCP 8888, 443). Refer to Fortinet Community KB and update client if unresolved.",
+          source: "cli",
+        });
       }
     }
   }
 
   if (available === "available" || available === "yes") {
-    return makeFinding(
-      "FGT-FG-01",
-      "FortiGuard Sync",
-      "PASS",
-      "FortiGuard FDN connection is available and definition update synchronization is current.",
-      "",
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-FG-01",
+      component: "FortiGuard Sync",
+      status: "PASS",
+      findingText: "FortiGuard FDN connection is available and definition update synchronization is current.",
+      actionText: "",
+      source: "cli",
+    });
   }
 
-  return makeFinding(
-    "FGT-FG-01",
-    "FortiGuard Sync",
-    "WARN",
-    "diagnose autoupdate status output detected, but FDN availability status could not be conclusively validated.",
-    "Verify FortiGuard connectivity manually via 'execute ping service.fortiguard.net'.",
-    "cli"
-  );
+  return makeFinding({
+    id: "FGT-FG-01",
+    component: "FortiGuard Sync",
+    status: "WARN",
+    findingText: "diagnose autoupdate status output detected, but FDN availability status could not be conclusively validated.",
+    actionText: "Verify FortiGuard connectivity manually via 'execute ping service.fortiguard.net'.",
+    source: "cli",
+  });
 }
 
 /**
@@ -2220,35 +2229,35 @@ function checkFgtSdwanSla(text) {
   const triageAction = "Inspect underlying ISP gateway and physical carrier link. Review live health-check probes: diagnose sys sdwan health-check status and diagnose sys sdwan member.";
 
   if (deadMembers.length > 0) {
-    return makeFinding(
-      "FGT-SDWAN-01",
-      "FortiGate SD-WAN SLA",
-      "FAIL",
-      `SD-WAN SLA failure: ${deadMembers.length} member interface(s) reporting state 'dead':\n${memberBullets}\n\nRoot Cause & Meaning: ${rootCause}\nHealthy Baseline: ${healthyBaseline}`,
-      triageAction,
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-SDWAN-01",
+      component: "FortiGate SD-WAN SLA",
+      status: "FAIL",
+      findingText: `SD-WAN SLA failure: ${deadMembers.length} member interface(s) reporting state 'dead':\n${memberBullets}\n\nRoot Cause & Meaning: ${rootCause}\nHealthy Baseline: ${healthyBaseline}`,
+      actionText: triageAction,
+      source: "cli",
+    });
   }
 
   if (degradedMembers.length > 0) {
-    return makeFinding(
-      "FGT-SDWAN-01",
-      "FortiGate SD-WAN SLA",
-      "WARN",
-      `SD-WAN SLA degradation: ${degradedMembers.length} member link(s) exceeding SLA thresholds:\n${memberBullets}\n\nRoot Cause & Meaning: ${rootCause}\nHealthy Baseline: ${healthyBaseline}`,
-      triageAction,
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-SDWAN-01",
+      component: "FortiGate SD-WAN SLA",
+      status: "WARN",
+      findingText: `SD-WAN SLA degradation: ${degradedMembers.length} member link(s) exceeding SLA thresholds:\n${memberBullets}\n\nRoot Cause & Meaning: ${rootCause}\nHealthy Baseline: ${healthyBaseline}`,
+      actionText: triageAction,
+      source: "cli",
+    });
   }
 
-  return makeFinding(
-    "FGT-SDWAN-01",
-    "FortiGate SD-WAN SLA",
-    "PASS",
-    `All SD-WAN health-check member links meet SLA requirements:\n${memberBullets}\n\nHealthy Baseline: ${healthyBaseline}`,
-    "",
-    "cli"
-  );
+  return makeFinding({
+    id: "FGT-SDWAN-01",
+    component: "FortiGate SD-WAN SLA",
+    status: "PASS",
+    findingText: `All SD-WAN health-check member links meet SLA requirements:\n${memberBullets}\n\nHealthy Baseline: ${healthyBaseline}`,
+    actionText: "",
+    source: "cli",
+  });
 }
 
 /**
@@ -2510,24 +2519,24 @@ function checkSecWanAdminAccess(text, tokenizer = null) {
   const primarySource = entries.some((e) => e.source === "cli") ? "cli" : "conf";
 
   if (offendingInterfaces.length > 0) {
-    return makeFinding(
-      "SEC-INTF-01",
-      "WAN Administrative Access",
-      "FAIL",
-      `Administrative access exposed on external/WAN interface(s): ${offendingInterfaces.join("; ")}.`,
-      "Disable administrative access on external interface and document in client misconfiguration tracker.",
-      primarySource
-    );
+    return makeFinding({
+      id: "SEC-INTF-01",
+      component: "WAN Administrative Access",
+      status: "FAIL",
+      findingText: `Administrative access exposed on external/WAN interface(s): ${offendingInterfaces.join("; ")}.`,
+      actionText: "Disable administrative access on external interface and document in client misconfiguration tracker.",
+      source: primarySource,
+    });
   }
 
-  return makeFinding(
-    "SEC-INTF-01",
-    "WAN Administrative Access",
-    "PASS",
-    "Management access (HTTPS/SSH/HTTP/Telnet) is restricted to internal/dedicated management interfaces. External WAN interfaces are secured.",
-    "",
-    primarySource
-  );
+  return makeFinding({
+    id: "SEC-INTF-01",
+    component: "WAN Administrative Access",
+    status: "PASS",
+    findingText: "Management access (HTTPS/SSH/HTTP/Telnet) is restricted to internal/dedicated management interfaces. External WAN interfaces are secured.",
+    actionText: "",
+    source: primarySource,
+  });
 }
 
 function formatAccountList(accounts, limit = 5) {
@@ -2575,13 +2584,18 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
     }
   }
 
-  if (!users.length) {
-    const sectionMatch =
-      /(?:show|config)\s+user\s+local([\s\S]*?)(?:^end|\n\s*end|#\s*[a-z]|$)/im.exec(text) ||
-      /user\s+local([\s\S]*?)(?:^end|\n\s*end|#\s*[a-z]|$)/im.exec(text);
+  if (!users.length && text) {
+    let targetText = text;
+    const configIdx = text.search(/config\s+user\s+local/i);
+    if (configIdx !== -1) {
+      targetText = text.slice(configIdx);
+    }
 
-    const blockText = sectionMatch ? sectionMatch[1] : text;
-    const blockRe = /edit\s+(?:"([^"]+)"|(\S+))([\s\S]*?)next/gi;
+    const sectionMatch = /(?:config|show)\s+user\s+local\b([\s\S]*?)(?:\n\s*end\b|#\s*[a-z]|$)/i.exec(targetText) ||
+                         /user\s+local\b([\s\S]*?)(?:\n\s*end\b|#\s*[a-z]|$)/i.exec(targetText);
+
+    const blockText = sectionMatch ? sectionMatch[1] : targetText;
+    const blockRe = /edit\s+(?:"([^"]+)"|(\S+))([\s\S]*?)(?:next|(?=edit\s+)|$)/gi;
     let m;
     while ((m = blockRe.exec(blockText)) !== null) {
       const name = m[1] || m[2];
@@ -2645,7 +2659,7 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
     "Enforce FortiToken Mobile or Email MFA on all remaining LDAP users, audit and remove obsolete test/admin accounts (e.g., 'test_user', 'vendor_vpn'), or migrate SSL-VPN authentication to SAML (Microsoft Entra ID / Okta) with centralized Conditional Access MFA.";
 
   // Global SAML enforced
-  if (hasGlobalSaml && insecurePasswordAccounts.length === 0) {
+  if (hasGlobalSaml && insecurePasswordAccounts.length === 0 && singleFactorLdapAccounts.length === 0) {
     return makeFinding({
       id: "SEC-USER-01",
       component: "User Authentication & MFA",
@@ -2708,16 +2722,17 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
     );
   }
 
-  return makeFinding(
-    "SEC-USER-01",
-    "User Authentication & MFA",
-    isFail ? "FAIL" : "WARN",
-    lines.join("\n"),
+  return makeFinding({
+    id: "SEC-USER-01",
+    component: "User Authentication & MFA",
+    status: isFail ? "FAIL" : "WARN",
+    category: "SecOps Operational",
+    source: primarySource,
+    data: { isSaml: false, insecurePasswordAccounts, singleFactorLdapAccounts, compliantMfaAccounts },
+    findingText: lines.join("\n"),
     actionText,
-    remCli,
-    "SecOps Operational",
-    primarySource
-  );
+    remediationCli: remCli,
+  });
 }
 
 /**
@@ -2742,24 +2757,24 @@ function checkFgtBanList(text) {
   const uniqueIps = [...new Set(matches.filter((ip) => ip !== "0.0.0.0" && ip !== "255.255.255.255"))];
 
   if (uniqueIps.length > 0) {
-    return makeFinding(
-      "FGT-BAN-01",
-      "FortiGate Banned IPs",
-      "WARN",
-      `${uniqueIps.length} active banned/quarantined IP(s) detected in the ban table: ${uniqueIps.join(", ")}.`,
-      "Submit Pull Request to block these IPs globally across all customer environments.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-BAN-01",
+      component: "FortiGate Banned IPs",
+      status: "WARN",
+      findingText: `${uniqueIps.length} active banned/quarantined IP(s) detected in the ban table: ${uniqueIps.join(", ")}.`,
+      actionText: "Submit Pull Request to block these IPs globally across all customer environments.",
+      source: "cli",
+    });
   }
 
-  return makeFinding(
-    "FGT-BAN-01",
-    "FortiGate Banned IPs",
-    "PASS",
-    "No active IP bans found in quarantine table (0 banned source IPs).",
-    "",
-    "cli"
-  );
+  return makeFinding({
+    id: "FGT-BAN-01",
+    component: "FortiGate Banned IPs",
+    status: "PASS",
+    findingText: "No active IP bans found in quarantine table (0 banned source IPs).",
+    actionText: "",
+    source: "cli",
+  });
 }
 
 /**
@@ -2773,36 +2788,36 @@ function checkFgtMiglogd(text) {
   const fazMatch = /faz\s*=\s*(\d+)/i.exec(text);
 
   if (!fazMatch) {
-    return makeFinding(
-      "FGT-LOG-01",
-      "FortiGate Log Delivery",
-      "WARN",
-      "miglogd diagnostic output detected, but 'faz=' counter was not found.",
-      "Verify FortiAnalyzer destination configuration ('config log fortianalyzer setting') and verify OFTP certificate trust.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-LOG-01",
+      component: "FortiGate Log Delivery",
+      status: "WARN",
+      findingText: "miglogd diagnostic output detected, but 'faz=' counter was not found.",
+      actionText: "Verify FortiAnalyzer destination configuration ('config log fortianalyzer setting') and verify OFTP certificate trust.",
+      source: "cli",
+    });
   }
 
   const count = parseInt(fazMatch[1], 10);
   if (count > 0) {
-    return makeFinding(
-      "FGT-LOG-01",
-      "FortiGate Log Delivery",
-      "PASS",
-      `miglogd reports active log transmission to FortiAnalyzer (faz=${count} messages processed/sent).`,
-      "",
-      "cli"
-    );
+    return makeFinding({
+      id: "FGT-LOG-01",
+      component: "FortiGate Log Delivery",
+      status: "PASS",
+      findingText: `miglogd reports active log transmission to FortiAnalyzer (faz=${count} messages processed/sent).`,
+      actionText: "",
+      source: "cli",
+    });
   }
 
-  return makeFinding(
-    "FGT-LOG-01",
-    "FortiGate Log Delivery",
-    "WARN",
-    "miglogd reports faz=0 — no logs are currently being forwarded to the FortiAnalyzer.",
-    "Verify network reachability to FortiAnalyzer and confirm firewall policy logging ('set logtraffic all') is enabled.",
-    "cli"
-  );
+  return makeFinding({
+    id: "FGT-LOG-01",
+    component: "FortiGate Log Delivery",
+    status: "WARN",
+    findingText: "miglogd reports faz=0 — no logs are currently being forwarded to the FortiAnalyzer.",
+    actionText: "Verify network reachability to FortiAnalyzer and confirm firewall policy logging ('set logtraffic all') is enabled.",
+    source: "cli",
+  });
 }
 
 /**
@@ -2839,35 +2854,35 @@ function checkFazStorage(text) {
   if (!worst) return null;
 
   if (worst.pct >= THRESHOLDS.fazStorageFail) {
-    return makeFinding(
-      "FAZ-STOR-01",
-      "FortiAnalyzer Storage",
-      "FAIL",
-      `Critical disk utilization on ${worst.mount}: ${worst.pct}% used (>= ${THRESHOLDS.fazStorageFail}% threshold).`,
-      "Alert! Disk usage reached 75%. Send email to client requesting additional storage disk.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FAZ-STOR-01",
+      component: "FortiAnalyzer Storage",
+      status: "FAIL",
+      findingText: `Critical disk utilization on ${worst.mount}: ${worst.pct}% used (>= ${THRESHOLDS.fazStorageFail}% threshold).`,
+      actionText: "Alert! Disk usage reached 75%. Send email to client requesting additional storage disk.",
+      source: "cli",
+    });
   }
 
   if (worst.pct >= THRESHOLDS.fazStorageWarn) {
-    return makeFinding(
-      "FAZ-STOR-01",
-      "FortiAnalyzer Storage",
-      "WARN",
-      `Elevated disk utilization on ${worst.mount}: ${worst.pct}% used (warning threshold: 70%-74%).`,
-      "Review log retention policy / quotas and prepare storage expansion plan before disk reaches 75%.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FAZ-STOR-01",
+      component: "FortiAnalyzer Storage",
+      status: "WARN",
+      findingText: `Elevated disk utilization on ${worst.mount}: ${worst.pct}% used (warning threshold: 70%-74%).`,
+      actionText: "Review log retention policy / quotas and prepare storage expansion plan before disk reaches 75%.",
+      source: "cli",
+    });
   }
 
-  return makeFinding(
-    "FAZ-STOR-01",
-    "FortiAnalyzer Storage",
-    "PASS",
-    `Healthy disk utilization on ${worst.mount}: ${worst.pct}% used (< ${THRESHOLDS.fazStorageWarn}% threshold).`,
-    "",
-    "cli"
-  );
+  return makeFinding({
+    id: "FAZ-STOR-01",
+    component: "FortiAnalyzer Storage",
+    status: "PASS",
+    findingText: `Healthy disk utilization on ${worst.mount}: ${worst.pct}% used (< ${THRESHOLDS.fazStorageWarn}% threshold).`,
+    actionText: "",
+    source: "cli",
+  });
 }
 
 /**
@@ -2994,35 +3009,35 @@ function checkFazSysPerformanceHa(text) {
     (mem !== null && mem > THRESHOLDS.fazMemFail);
 
   if (isLicInvalid) {
-    return makeFinding(
-      "FAZ-SYS-01",
-      "FortiAnalyzer System & HA",
-      "FAIL",
-      `FortiAnalyzer License Status is '${license}' (Expected: Valid). HA Mode: ${haMode}.`,
-      "Renew or re-register FortiAnalyzer license entitlement in FortiCare support portal immediately.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FAZ-SYS-01",
+      component: "FortiAnalyzer System & HA",
+      status: "FAIL",
+      findingText: `FortiAnalyzer License Status is '${license}' (Expected: Valid). HA Mode: ${haMode}.`,
+      actionText: "Renew or re-register FortiAnalyzer license entitlement in FortiCare support portal immediately.",
+      source: "cli",
+    });
   }
 
   if (isPerfFail) {
-    return makeFinding(
-      "FAZ-SYS-01",
-      "FortiAnalyzer System & HA",
-      "FAIL",
-      `High resource utilization: CPU ${cpu || 0}% used, Memory ${mem || 0}% used (License: Valid, HA: ${haMode}).`,
-      "Examine active report compilation, SQL queries, or log indexing load; consider VM memory/vCPU expansion.",
-      "cli"
-    );
+    return makeFinding({
+      id: "FAZ-SYS-01",
+      component: "FortiAnalyzer System & HA",
+      status: "FAIL",
+      findingText: `High resource utilization: CPU ${cpu || 0}% used, Memory ${mem || 0}% used (License: Valid, HA: ${haMode}).`,
+      actionText: "Examine active report compilation, SQL queries, or log indexing load; consider VM memory/vCPU expansion.",
+      source: "cli",
+    });
   }
 
-  return makeFinding(
-    "FAZ-SYS-01",
-    "FortiAnalyzer System & HA",
-    "PASS",
-    `FortiAnalyzer operating normally: CPU ${cpu || 0}%, Memory ${mem || 0}%, License: Valid, HA Mode: ${haMode}.`,
-    "",
-    "cli"
-  );
+  return makeFinding({
+    id: "FAZ-SYS-01",
+    component: "FortiAnalyzer System & HA",
+    status: "PASS",
+    findingText: `FortiAnalyzer operating normally: CPU ${cpu || 0}%, Memory ${mem || 0}%, License: Valid, HA Mode: ${haMode}.`,
+    actionText: "",
+    source: "cli",
+  });
 }
 
 /**
@@ -3372,6 +3387,8 @@ function checkSecAdminMfa(text, ast) {
   for (const s of scopes) {
     const admins = (s.system && s.system.admin) || s['system admin'] || {};
     for (const [adminName, data] of Object.entries(admins)) {
+      const status = (data['status'] || 'enable').toLowerCase();
+      if (status === 'disable') continue;
       totalAdmins++;
       const twoFactor = (data['two-factor'] || data['two-factor-authentication'] || '').toLowerCase();
       const hasMfa = twoFactor && twoFactor !== 'disable';
@@ -3396,6 +3413,7 @@ function checkSecAdminMfa(text, ast) {
     const adminBlocks = text.split(/(?:^|\n)\s*edit\s+/i);
     for (let i = 1; i < adminBlocks.length; i++) {
       const block = adminBlocks[i];
+      if (/set\s+status\s+disable/i.test(block)) continue;
       if (/set\s+password|set\s+accprofile/i.test(block)) {
         totalAdmins++;
         const m = block.match(/^["']?([a-zA-Z0-9_-]+)["']?/);
@@ -4460,13 +4478,14 @@ class FortiOSConfigTokenizer {
       return this.vdoms[vdom][lowerName];
     }
 
-    // 2. Global / root priority for system-global sections
+    // 2. Global / root priority for system-global sections ONLY
     const SYSTEM_GLOBAL_SECTIONS = new Set([
       "system global", "system ntp", "system dns", "system password-policy",
       "system snmp community", "system snmp user", "system snmp sysinfo",
       "log fortianalyzer setting", "log syslogd setting", "system admin",
-      "user saml", "system saml"
+      "user saml", "system saml", "system external-resource"
     ]);
+
     if (SYSTEM_GLOBAL_SECTIONS.has(lowerName)) {
       if (this.vdoms["global"] && this.vdoms["global"][lowerName]) {
         return this.vdoms["global"][lowerName];
@@ -4477,31 +4496,21 @@ class FortiOSConfigTokenizer {
       if (this.sections[lowerName]) {
         return this.sections[lowerName];
       }
-    }
-
-    // 3. Fallback to global scope
-    if (this.vdoms["global"] && this.vdoms["global"][lowerName]) {
-      return this.vdoms["global"][lowerName];
-    }
-
-    // 4. Fallback to root scope
-    if (this.vdoms["root"] && this.vdoms["root"][lowerName]) {
-      return this.vdoms["root"][lowerName];
-    }
-
-    // 5. Fallback to flat sections map
-    if (this.sections[lowerName]) {
-      return this.sections[lowerName];
-    }
-
-    // 6. Deep search across all available VDOMs (Multi-VDOM support)
-    for (const v of this.getAllVdoms()) {
-      if (this.vdoms[v] && this.vdoms[v][lowerName]) {
-        return this.vdoms[v][lowerName];
+      for (const v of this.getAllVdoms()) {
+        if (this.vdoms[v] && this.vdoms[v][lowerName]) {
+          return this.vdoms[v][lowerName];
+        }
       }
+      return null;
     }
 
-    return null;
+    // For per-VDOM sections (firewall policy, firewall address, vpn ssl settings, etc.):
+    // If the requested vdom is known, return null (never leak from root into other VDOMs!)
+    if (vdom && this.vdoms[vdom]) {
+      return null;
+    }
+
+    return this.sections[lowerName] || null;
   }
 
   getProperty(sectionName, key, vdom = "root") {
@@ -4839,7 +4848,7 @@ function getFirewallPolicyList(tokenizer, text) {
           displayName: vdom !== "root" ? `[VDOM: ${vdom}] Policy ${id}` : `Policy ${id}`,
           name: cleanVal(entry.properties["name"] || ""),
           status,
-          action: cleanVal(entry.properties["action"] || "accept").toLowerCase(),
+          action: cleanVal(entry.properties["action"] || "deny").toLowerCase(),
           schedule,
           srcintf: extractQuotedTokens(entry.properties["srcintf"] || ""),
           dstintf: extractQuotedTokens(entry.properties["dstintf"] || ""),
@@ -4882,7 +4891,7 @@ function getFirewallPolicyList(tokenizer, text) {
         displayName: `Policy ${m[1]}`,
         name: nameM ? (nameM[1] || nameM[2]) : "",
         status: statusM ? statusM[1].toLowerCase() : "enable",
-        action: actM ? actM[1].toLowerCase() : "accept",
+        action: actM ? actM[1].toLowerCase() : "deny",
         schedule,
         srcintf: srcintfM ? extractQuotedTokens(srcintfM[1]) : [],
         dstintf: dstintfM ? extractQuotedTokens(dstintfM[1]) : [],
@@ -5069,16 +5078,16 @@ function checkSecVirtualIps(tokenizer, text = "") {
   const unforwardedVips = vipList.filter((v) => !v.isPortForwardEnabled);
 
   if (!unforwardedVips.length) {
-    return makeFinding(
-      "SEC-VIP-01",
-      "Virtual IP (VIP) Port Forwarding",
-      "PASS",
-      `All ${vipList.length} configured Virtual IP(s) enforce explicit port forwarding restrictions.`,
-      "",
-      "",
-      "Security & Hardening",
-      src
-    );
+    return makeFinding({
+      id: "SEC-VIP-01",
+      component: "Virtual IP (VIP) Port Forwarding",
+      status: "PASS",
+      findingText: `All ${vipList.length} configured Virtual IP(s) enforce explicit port forwarding restrictions.`,
+      actionText: "",
+      remediationCli: "",
+      category: "Security & Hardening",
+      source: src,
+    });
   }
 
   const proxyPolicyList = getFirewallProxyPolicyList(tokenizer, text);
@@ -5126,16 +5135,16 @@ function checkSecVirtualIps(tokenizer, text = "") {
     const ztnaBullets = ztnaList
       .map((z) => `  • ZTNA Access Proxy: '${z.name}' (Port ${z.extport || "default"} -> Mapped to ZTNA Proxy Architecture)`)
       .join("\n");
-    return makeFinding(
-      "SEC-VIP-01",
-      "Virtual IP (VIP) Port Forwarding",
-      "PASS",
-      `All ${vipList.length} configured Virtual IP(s) enforce explicit port forwarding or operate as active ZTNA Access Proxy servers:\n\nZTNA Proxy Server Objects (${ztnaList.length}):\n${ztnaBullets}`,
-      "",
-      "",
-      "Security & Hardening",
-      src
-    );
+    return makeFinding({
+      id: "SEC-VIP-01",
+      component: "Virtual IP (VIP) Port Forwarding",
+      status: "PASS",
+      findingText: `All ${vipList.length} configured Virtual IP(s) enforce explicit port forwarding or operate as active ZTNA Access Proxy servers:\n\nZTNA Proxy Server Objects (${ztnaList.length}):\n${ztnaBullets}`,
+      actionText: "",
+      remediationCli: "",
+      category: "Security & Hardening",
+      source: src,
+    });
   }
 
   const policyList = getFirewallPolicyList(tokenizer, text);
@@ -5147,16 +5156,16 @@ function checkSecVirtualIps(tokenizer, text = "") {
       ? `\n\nZTNA Proxy Server Objects (${ztnaList.length} VIP${ztnaList.length > 1 ? "s" : ""}):\n` +
         ztnaList.map((z) => `  • ZTNA Access Proxy: '${z.name}' (Port ${z.extport || "default"} -> Mapped to ZTNA Proxy Architecture)`).join("\n")
       : "";
-    return makeFinding(
-      "SEC-VIP-01",
-      "Virtual IP (VIP) Port Forwarding",
-      "WARN",
-      `${standardUnforwardedVips.length} Virtual IP(s) configured without port forwarding (${names}). Policy binding could not be verified (firewall policy section missing).${ztnaSection}`,
-      "Enable portforward ('set portforward enable', 'set extport ...', 'set mappedport ...') on VIPs to restrict access strictly to required service ports.",
-      `config firewall vip\n    edit "${standardUnforwardedVips[0].name}"\n        set portforward enable\n        set extport <port>\n        set mappedport <port>\n    next\nend`,
-      "Security & Hardening",
-      src
-    );
+    return makeFinding({
+      id: "SEC-VIP-01",
+      component: "Virtual IP (VIP) Port Forwarding",
+      status: "WARN",
+      findingText: `${standardUnforwardedVips.length} Virtual IP(s) configured without port forwarding (${names}). Policy binding could not be verified (firewall policy section missing).${ztnaSection}`,
+      actionText: "Enable portforward ('set portforward enable', 'set extport ...', 'set mappedport ...') on VIPs to restrict access strictly to required service ports.",
+      remediationCli: `config firewall vip\n    edit "${standardUnforwardedVips[0].name}"\n        set portforward enable\n        set extport <port>\n        set mappedport <port>\n    next\nend`,
+      category: "Security & Hardening",
+      source: src,
+    });
   }
 
   const activePolicies = policyList.filter((p) => {
@@ -5267,69 +5276,69 @@ function checkSecVirtualIps(tokenizer, text = "") {
 
   if (failList.length > 0) {
     const firstFail = failList[0];
-    return makeFinding(
-      "SEC-VIP-01",
-      "Virtual IP (VIP) Port Forwarding",
-      "FAIL",
-      structuredFindingText,
-      `Configure explicit port forwarding on exposed VIP '${firstFail.vip}' ('set portforward enable', 'set extport ...', 'set mappedport ...') or restrict Policy ${firstFail.policyId} service from ALL to required ports only.`,
-      `config firewall vip\n    edit "${firstFail.vip}"\n        set portforward enable\n        set extport <external-port>\n        set mappedport <mapped-port>\n    next\nend`,
-      "Security & Hardening",
-      src
-    );
+    return makeFinding({
+      id: "SEC-VIP-01",
+      component: "Virtual IP (VIP) Port Forwarding",
+      status: "FAIL",
+      findingText: structuredFindingText,
+      actionText: `Configure explicit port forwarding on exposed VIP '${firstFail.vip}' ('set portforward enable', 'set extport ...', 'set mappedport ...') or restrict Policy ${firstFail.policyId} service from ALL to required ports only.`,
+      remediationCli: `config firewall vip\n    edit "${firstFail.vip}"\n        set portforward enable\n        set extport <external-port>\n        set mappedport <mapped-port>\n    next\nend`,
+      category: "Security & Hardening",
+      source: src,
+    });
   }
 
   if (warnList.length > 0) {
     const firstWarn = warnList[0];
-    return makeFinding(
-      "SEC-VIP-01",
-      "Virtual IP (VIP) Port Forwarding",
-      "WARN",
-      structuredFindingText,
-      `Enable explicit port forwarding on VIP '${firstWarn.vip}' at the VIP definition layer for defense-in-depth port restriction.`,
-      `config firewall vip\n    edit "${firstWarn.vip}"\n        set portforward enable\n        set extport <external-port>\n        set mappedport <mapped-port>\n    next\nend`,
-      "Security & Hardening",
-      src
-    );
+    return makeFinding({
+      id: "SEC-VIP-01",
+      component: "Virtual IP (VIP) Port Forwarding",
+      status: "WARN",
+      findingText: structuredFindingText,
+      actionText: `Enable explicit port forwarding on VIP '${firstWarn.vip}' at the VIP definition layer for defense-in-depth port restriction.`,
+      remediationCli: `config firewall vip\n    edit "${firstWarn.vip}"\n        set portforward enable\n        set extport <external-port>\n        set mappedport <mapped-port>\n    next\nend`,
+      category: "Security & Hardening",
+      source: src,
+    });
   }
 
   if (infoList.length > 0) {
     const firstInfo = infoList[0];
-    return makeFinding(
-      "SEC-VIP-01",
-      "Virtual IP (VIP) Port Forwarding",
-      "INFO",
-      structuredFindingText,
-      `Audit unreferenced VIP '${firstInfo.vip}'. If obsolete or unused, remove it to maintain clean firewall configuration hygiene.`,
-      `config firewall vip\n    delete "${firstInfo.vip}"\nend`,
-      "Security & Hardening",
-      src
-    );
+    return makeFinding({
+      id: "SEC-VIP-01",
+      component: "Virtual IP (VIP) Port Forwarding",
+      status: "INFO",
+      findingText: structuredFindingText,
+      actionText: `Audit unreferenced VIP '${firstInfo.vip}'. If obsolete or unused, remove it to maintain clean firewall configuration hygiene.`,
+      remediationCli: `config firewall vip\n    delete "${firstInfo.vip}"\nend`,
+      category: "Security & Hardening",
+      source: src,
+    });
   }
 
   if (ztnaList.length > 0) {
-    return makeFinding(
-      "SEC-VIP-01",
-      "Virtual IP (VIP) Port Forwarding",
-      "PASS",
-      `All ${vipList.length} configured Virtual IP(s) enforce explicit port forwarding or operate as active ZTNA Access Proxy servers:\n${structuredFindingText}`,
-      "",
-      "",
-      "Security & Hardening",
-      src
-    );
+    return makeFinding({
+      id: "SEC-VIP-01",
+      component: "Virtual IP (VIP) Port Forwarding",
+      status: "PASS",
+      findingText: `All ${vipList.length} configured Virtual IP(s) enforce explicit port forwarding or operate as active ZTNA Access Proxy servers:\n${structuredFindingText}`,
+      actionText: "",
+      remediationCli: "",
+      category: "Security & Hardening",
+      source: src,
+    });
   }
 
-  return makeFinding(
-    "SEC-VIP-01",
-    "Virtual IP (VIP) Port Forwarding",
-    "PASS",
-    `All ${vipList.length} configured Virtual IP(s) enforce explicit port forwarding restrictions.`,
-    "",
-    "",
-    "Security & Hardening",
-    src
-  );
+  return makeFinding({
+    id: "SEC-VIP-01",
+    component: "Virtual IP (VIP) Port Forwarding",
+    status: "PASS",
+    findingText: `All ${vipList.length} configured Virtual IP(s) enforce explicit port forwarding restrictions.`,
+    actionText: "",
+    remediationCli: "",
+    category: "Security & Hardening",
+    source: src,
+  });
 }
 
 /**
@@ -7582,10 +7591,11 @@ function checkSecFirewallAnyPolicy(tokenizer, text = "") {
 
   for (const pol of policyList) {
     if (pol.status === "disable") continue;
-    if (pol.action === "accept") {
-      const isSrcAll = pol.srcaddr.some((a) => a.toLowerCase() === "all");
-      const isDstAll = pol.dstaddr.some((a) => a.toLowerCase() === "all");
-      const isSrvAll = pol.service.some((s) => s.toLowerCase() === "all");
+    const isAccept = !pol.action || pol.action === "accept";
+    if (isAccept) {
+      const isSrcAll = pol.srcaddr.some((a) => a.toLowerCase() === "all" || a === "0.0.0.0/0");
+      const isDstAll = pol.dstaddr.some((a) => a.toLowerCase() === "all" || a === "0.0.0.0/0");
+      const isSrvAll = pol.service.some((s) => s.toLowerCase() === "all") || !pol.service.length;
       const hasUtm = pol.utmStatus === "enable";
 
       if (isSrcAll && isDstAll && isSrvAll && !hasUtm) {
@@ -7625,6 +7635,58 @@ function checkSecFirewallAnyPolicy(tokenizer, text = "") {
   });
 }
 
+function portRangeIncludes(rangeStr, targetPort) {
+  if (!rangeStr) return false;
+  const parts = rangeStr.split(/[\s,]+/);
+  for (const part of parts) {
+    const dash = part.split("-");
+    if (dash.length === 2) {
+      const low = parseInt(dash[0], 10);
+      const high = parseInt(dash[1], 10);
+      if (!isNaN(low) && !isNaN(high) && targetPort >= low && targetPort <= high) {
+        return true;
+      }
+    } else {
+      const p = parseInt(part, 10);
+      if (p === targetPort) return true;
+    }
+  }
+  return false;
+}
+
+function getCustomServicesMap(tokenizer, text = "") {
+  const map = {};
+  if (tokenizer) {
+    for (const vdom of tokenizer.getAllVdoms()) {
+      const entries = tokenizer.getEntries("firewall service custom", vdom);
+      for (const [name, entry] of Object.entries(entries)) {
+        const props = entry.properties || {};
+        const tcpRange = props["tcp-portrange"] || "";
+        const udpRange = props["udp-portrange"] || "";
+        map[name.toLowerCase()] = { name, tcpRange, udpRange };
+      }
+    }
+  }
+  if (text) {
+    const secMatch = /(?:config|show)\s+firewall\s+service\s+custom([\s\S]*?)(?:^end|\n\s*end)/im.exec(text);
+    const scope = secMatch ? secMatch[1] : text;
+    const editRe = /edit\s+(?:"([^"]+)"|(\S+))([\s\S]*?)(?:next|(?=edit\s+)|$)/gi;
+    let em;
+    while ((em = editRe.exec(scope)) !== null) {
+      const sName = (em[1] || em[2]).toLowerCase();
+      const body = em[3];
+      const tcpM = /set\s+tcp-portrange\s+([^\r\n]+)/i.exec(body);
+      const udpM = /set\s+udp-portrange\s+([^\r\n]+)/i.exec(body);
+      map[sName] = {
+        name: em[1] || em[2],
+        tcpRange: tcpM ? tcpM[1].trim() : "",
+        udpRange: udpM ? udpM[1].trim() : ""
+      };
+    }
+  }
+  return map;
+}
+
 /**
  * SEC-FW-02: Inbound Dangerous Ports from WAN
  * Section: config firewall policy
@@ -7652,22 +7714,28 @@ function checkSecInboundDangerousPorts(tokenizer, text = "") {
   if (!policyList.length) return null;
 
   const wanSet = getKnownWanInterfaces(tokenizer, text);
+  const customServices = getCustomServicesMap(tokenizer, text);
   const offendingPolicies = [];
 
   for (const p of policyList) {
     if (p.status === "disable") continue;
-    if (p.action !== "accept") continue;
+    if (p.action && p.action !== "accept") continue;
 
     const wanIngress = p.srcintf.filter((intf) => isWanInterface(intf, wanSet));
     if (!wanIngress.length) continue;
 
-    const isSrcAll = p.srcaddr.some((addr) => addr.toLowerCase() === "all");
+    const isSrcAll = p.srcaddr.some((addr) => addr.toLowerCase() === "all" || addr === "0.0.0.0/0");
     if (!isSrcAll) continue;
 
     const detected = [];
+    if (!p.service.length) {
+      detected.push("ALL (Unrestricted)");
+    }
     for (const s of p.service) {
       const lower = s.toLowerCase();
-      if (/\b(?:rdp|ms-wbt-server|3389)\b/i.test(lower)) {
+      if (lower === "all" || lower === "any") {
+        detected.push("ALL (All Ports Permitted)");
+      } else if (/\b(?:rdp|ms-wbt-server|3389)\b/i.test(lower)) {
         detected.push("RDP (3389)");
       } else if (/\b(?:ssh|22)\b/i.test(lower)) {
         detected.push("SSH (22)");
@@ -7675,6 +7743,20 @@ function checkSecInboundDangerousPorts(tokenizer, text = "") {
         detected.push("Telnet (23)");
       } else if (/\b(?:smb|samba|microsoft-ds|netbios-ssn|445|139)\b/i.test(lower)) {
         detected.push("SMB (445)");
+      } else if (customServices[lower]) {
+        const cObj = customServices[lower];
+        if (portRangeIncludes(cObj.tcpRange, 3389) || portRangeIncludes(cObj.udpRange, 3389)) {
+          detected.push(`RDP 3389 (via ${cObj.name})`);
+        }
+        if (portRangeIncludes(cObj.tcpRange, 22) || portRangeIncludes(cObj.udpRange, 22)) {
+          detected.push(`SSH 22 (via ${cObj.name})`);
+        }
+        if (portRangeIncludes(cObj.tcpRange, 23) || portRangeIncludes(cObj.udpRange, 23)) {
+          detected.push(`Telnet 23 (via ${cObj.name})`);
+        }
+        if (portRangeIncludes(cObj.tcpRange, 445) || portRangeIncludes(cObj.tcpRange, 139)) {
+          detected.push(`SMB 445 (via ${cObj.name})`);
+        }
       }
     }
 
@@ -7731,18 +7813,30 @@ function checkCisLogCentralized(tokenizer, text = "") {
   let fazStatus = tokenizer ? cleanVal(tokenizer.getProperty("log fortianalyzer setting", "status")) : null;
   let syslogStatus = tokenizer ? cleanVal(tokenizer.getProperty("log syslogd setting", "status")) : null;
 
-  if (!fazStatus && text) {
-    const m = /config\s+log\s+fortianalyzer\s+setting[\s\S]*?set\s+status\s+(\S+)/i.exec(text);
+  let fazBlock = "";
+  let syslogBlock = "";
+  if (text) {
+    const fazMatch = /(?:^|\n)\s*config\s+log\s+fortianalyzer\s+setting\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(text) ||
+      /(?:^|\n)[^\n#$]*[#$]?\s*(?:get|show)\s+log\s+fortianalyzer\s+setting\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*end\b|$)/i.exec(text);
+    if (fazMatch) fazBlock = fazMatch[1];
+
+    const syslogMatch = /(?:^|\n)\s*config\s+log\s+syslogd\s+setting\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(text) ||
+      /(?:^|\n)[^\n#$]*[#$]?\s*(?:get|show)\s+log\s+syslogd\s+setting\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*end\b|$)/i.exec(text);
+    if (syslogMatch) syslogBlock = syslogMatch[1];
+  }
+
+  if (!fazStatus && fazBlock) {
+    const m = /(?:set\s+)?status\s*[:=]?\s*(\S+)/i.exec(fazBlock);
     if (m) fazStatus = m[1];
   }
-  if (!syslogStatus && text) {
-    const m = /config\s+log\s+syslogd\s+setting[\s\S]*?set\s+status\s+(\S+)/i.exec(text);
+  if (!syslogStatus && syslogBlock) {
+    const m = /(?:set\s+)?status\s*[:=]?\s*(\S+)/i.exec(syslogBlock);
     if (m) syslogStatus = m[1];
   }
 
   const hasLogSection = tokenizer
     ? (!!tokenizer.getSection("log fortianalyzer setting") || !!tokenizer.getSection("log syslogd setting"))
-    : /(?:log\s+fortianalyzer\s+setting|log\s+syslogd\s+setting)/i.test(text);
+    : (!!fazBlock || !!syslogBlock || /(?:log\s+fortianalyzer\s+setting|log\s+syslogd\s+setting)/i.test(text));
 
   const remCli = "config log fortianalyzer setting\n    set status enable\n    set server <ip-address>\nend";
   const src = tokenizer ? "conf" : "cli";
@@ -7866,17 +7960,10 @@ function checkCisAuthTrustedHosts(tokenizer, text = "") {
       continue;
     }
 
-    const hasRestrictedHost = admin.trusthosts.some((th) => {
-      const lower = th.toLowerCase().trim();
-      return (
-        lower !== "0.0.0.0 0.0.0.0" &&
-        lower !== "0.0.0.0/0" &&
-        lower !== "0.0.0.0/0.0.0.0" &&
-        lower !== ""
-      );
-    });
+    const hasOpenTrusthost = admin.trusthosts.some((th) => isUnhardenedTrusthost(th));
+    const hasRestrictedHost = admin.trusthosts.some((th) => !isUnhardenedTrusthost(th));
 
-    if (!hasRestrictedHost) {
+    if (hasOpenTrusthost || !hasRestrictedHost) {
       unconstrainedAdmins.push(admin);
     }
   }
@@ -8040,7 +8127,7 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
   const isStrongCryptoDisabled = !isStrongCryptoCompliant;
 
   const fullText = (tokenizer && tokenizer.rawText) ? tokenizer.rawText : text;
-  const isExplicitLegacyOs = /(?:#config-version=[^:\r\n]*?[-_ ]|[vV]|Version:\s*.*?)([56]\.[0-9]+)/i.test(fullText);
+  const isExplicitLegacyOs = /(?:#config-version=[^:\r\n]*?[-_ ]|\b(?:Version|Firmware):\s*.*?\bv?|\bv)([56]\.[0-9]+)\b/i.test(fullText);
   const isFortiOS7 = !isExplicitLegacyOs;
 
   const isSslMinVerUnset = !sslMinVer;
@@ -8127,18 +8214,38 @@ function checkCisCertFactoryDefault(tokenizer, text = "") {
     }
   }
 
-  if (adminCert === null && text) {
-    const m = /set\s+admin-server-cert\s+(?:"([^"]+)"|(\S+))/i.exec(text);
-    if (m) adminCert = cleanVal(m[1] || m[2]);
+  let globalBlock = "";
+  let vpnSslBlock = "";
+  if (text) {
+    const gMatch = /(?:^|\n)\s*config\s+system\s+global\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(text) ||
+      /(?:^|\n)[^\n#$]*[#$]?\s*(?:get|show)\s+system\s+global\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*end\b|$)/i.exec(text);
+    if (gMatch) globalBlock = gMatch[1];
+
+    const vMatch = /(?:^|\n)\s*config\s+vpn\s+ssl\s+settings\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(text) ||
+      /(?:^|\n)[^\n#$]*[#$]?\s*(?:get|show)\s+vpn\s+ssl\s+settings\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*end\b|$)/i.exec(text);
+    if (vMatch) vpnSslBlock = vMatch[1];
   }
-  if (sslCert === null && text) {
-    const m = /config\s+vpn\s+ssl\s+settings[\s\S]*?set\s+servercert\s+(?:"([^"]+)"|(\S+))/i.exec(text);
-    if (m) sslCert = cleanVal(m[1] || m[2]);
+
+  if (adminCert === null) {
+    if (globalBlock) {
+      const m = /(?:set\s+)?admin-server-cert\s*[:=]?\s*(?:"([^"]+)"|(\S+))/i.exec(globalBlock);
+      if (m) adminCert = cleanVal(m[1] || m[2]);
+    } else if (text) {
+      const m = /set\s+admin-server-cert\s+(?:"([^"]+)"|(\S+))/i.exec(text);
+      if (m) adminCert = cleanVal(m[1] || m[2]);
+    }
+  }
+
+  if (sslCert === null) {
+    if (vpnSslBlock) {
+      const m = /(?:set\s+)?servercert\s*[:=]?\s*(?:"([^"]+)"|(\S+))/i.exec(vpnSslBlock);
+      if (m) sslCert = cleanVal(m[1] || m[2]);
+    }
   }
 
   const hasGlobalOrVpn = tokenizer
     ? (!!tokenizer.getSystemSection("system global") || !!tokenizer.getSection("system global") || !!tokenizer.getSection("vpn ssl settings"))
-    : /(?:config\s+system\s+global|config\s+vpn\s+ssl\s+settings)/i.test(text);
+    : (!!globalBlock || !!vpnSslBlock || /(?:config\s+system\s+global|config\s+vpn\s+ssl\s+settings)/i.test(text));
   const src = tokenizer ? "conf" : "cli";
 
   if (!hasGlobalOrVpn && adminCert === null && sslCert === null) {
@@ -8196,14 +8303,14 @@ function checkCisCertFactoryDefault(tokenizer, text = "") {
  * Clearly flag dynamic operational checks when static config is uploaded without live CLI data.
  */
 function makeRuntimeConfigIndicator() {
-  return makeFinding(
-    "RUNTIME-INFO",
-    "Operational Runtime Status",
-    "INFO",
-    "[INFO] Static Config Uploaded - Run live CLI commands on the unit to check operational runtime status.",
-    "Copy daily health check commands from the 'SecOps CLI Cheat Sheet' tab and run on the live firewall to audit Uptime, CPU/Memory, HA sync, IPSec, and SD-WAN.",
-    "conf"
-  );
+  return makeFinding({
+    id: "RUNTIME-INFO",
+    component: "Operational Runtime Status",
+    status: "INFO",
+    findingText: "[INFO] Static Config Uploaded - Run live CLI commands on the unit to check operational runtime status.",
+    actionText: "Copy daily health check commands from the 'SecOps CLI Cheat Sheet' tab and run on the live firewall to audit Uptime, CPU/Memory, HA sync, IPSec, and SD-WAN.",
+    source: "conf",
+  });
 }
 
 // =====================================================================
@@ -8409,7 +8516,7 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
             item.deviceName = item.deviceId;
             item.appliance = item.deviceId;
             rawFindings.push(item);
-            if (item.id.startsWith("FGT-") || item.id.startsWith("FAZ-") || item.id.startsWith("OPS-")) {
+            if (item.source === "cli") {
               hasOperationalCliFinding = true;
             }
           }
@@ -8418,7 +8525,7 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
           res.deviceName = res.deviceId;
           res.appliance = res.deviceId;
           rawFindings.push(res);
-          if (res.id.startsWith("FGT-") || res.id.startsWith("FAZ-") || res.id.startsWith("OPS-")) {
+          if (res.source === "cli") {
             hasOperationalCliFinding = true;
           }
         }
@@ -10035,12 +10142,6 @@ let loadedFiles = []; // Array of { id, name, size, type, content }
 let currentLang = "en";
 let issuesOnly = false;
 try {
-  const savedLang = localStorage.getItem("secops_lang");
-  if (savedLang === "en") currentLang = savedLang;
-} catch (e) {
-  console.warn("localStorage unavailable:", e);
-}
-try {
   issuesOnly = localStorage.getItem("secops_issues_only") === "true";
 } catch (e) {
   console.warn("localStorage unavailable:", e);
@@ -10206,6 +10307,10 @@ function updateSummaryCounters(findings) {
 
   const filesCount = loadedFiles.length || (DOM.cliInput && DOM.cliInput.value.trim() ? 1 : 0);
   updateSummaryIndicator(filesCount, profileFindings.length);
+
+  if (DOM.auditModeBadge) {
+    DOM.auditModeBadge.textContent = "56 Controls (Full Audit)";
+  }
 }
 
 function setExportButtonsEnabled(enabled) {
@@ -10216,12 +10321,7 @@ function setExportButtonsEnabled(enabled) {
 }
 
 function setLanguage(lang = "en") {
-  currentLang = lang || "en";
-  try {
-    localStorage.setItem("secops_lang", currentLang);
-  } catch (e) {
-    console.warn("localStorage unavailable:", e);
-  }
+  currentLang = "en";
 
   if (DOM.auditModeBadge) {
     DOM.auditModeBadge.textContent = "56 Controls (Full Audit)";
