@@ -51,74 +51,6 @@ const CIS_BENCHMARK_CONTROL_IDS = [
   "CIS-CERT-01",
 ];
 
-const CONFIGURABLE_HIGH_RISK_COUNTRIES = {
-  TR: "Turkey",
-  TUR: "Turkey",
-  RU: "Russia",
-  RUS: "Russia",
-  CN: "China",
-  CHN: "China",
-  IR: "Iran",
-  IRN: "Iran",
-  AE: "UAE",
-  ARE: "UAE",
-  UAE: "UAE",
-  IN: "India",
-  IND: "India",
-  TH: "Thailand",
-  THA: "Thailand",
-  RS: "Serbia",
-  SRB: "Serbia",
-  GE: "Georgia",
-  GEO: "Georgia",
-  ME: "Montenegro",
-  MNE: "Montenegro",
-  UA: "Ukraine",
-  UKR: "Ukraine",
-  BY: "Belarus",
-  BLR: "Belarus",
-  KP: "North Korea",
-  PRK: "North Korea",
-  SY: "Syria",
-  SYR: "Syria",
-  BR: "Brazil",
-  BRA: "Brazil",
-  VN: "Vietnam",
-  VNM: "Vietnam",
-  ID: "Indonesia",
-  IDN: "Indonesia",
-  PK: "Pakistan",
-  PAK: "Pakistan",
-  EG: "Egypt",
-  EGY: "Egypt",
-  SA: "Saudi Arabia",
-  SAU: "Saudi Arabia",
-  QA: "Qatar",
-  QAT: "Qatar",
-  JO: "Jordan",
-  JOR: "Jordan",
-  LB: "Lebanon",
-  LBN: "Lebanon",
-  IQ: "Iraq",
-  IRQ: "Iraq",
-  YE: "Yemen",
-  YEM: "Yemen",
-  AF: "Afghanistan",
-  AFG: "Afghanistan",
-  ZA: "South Africa",
-  ZAF: "South Africa",
-  NG: "Nigeria",
-  NGA: "Nigeria",
-  CO: "Colombia",
-  COL: "Colombia",
-  MX: "Mexico",
-  MEX: "Mexico",
-};
-
-function formatCountry(code) {
-  return CONFIGURABLE_HIGH_RISK_COUNTRIES[code] ? `${CONFIGURABLE_HIGH_RISK_COUNTRIES[code]} (${code})` : code;
-}
-
 function redactSensitiveData(text) {
   if (!text || typeof text !== "string") return text;
   return text
@@ -896,8 +828,8 @@ function checkFgtMemoryConserve(text) {
   const used_pct = usedMatch ? parseFloat(usedMatch[1]) : null;
 
   const thr = (n) =>
-    new RegExp("(?:memory used )?threshold\s+" + n + ":\s*\d+\s*MB\s+(\d+)%", "i").exec(text) ||
-    new RegExp(n + "\s+threshold:\s*(\d+)%", "i").exec(text);
+    new RegExp(`(?:memory used )?threshold\\s+${n}:\\s*\\d+\\s*MB\\s+(\\d+)%`, "i").exec(text) ||
+    new RegExp(`${n}\\s+threshold:\\s*(\\d+)%`, "i").exec(text);
 
   const redMatch = thr("red");
   const extremeMatch = thr("extreme");
@@ -982,6 +914,7 @@ function checkFgtSessionStat(text) {
   const data = {
     session_count,
     setup_rate,
+    exp_count,
     memory_tension_drop,
     ephemeral_ratio
   };
@@ -1666,7 +1599,7 @@ function checkFgtCrashlogHistory(text) {
   const cmdMatch = /(?:^|\n)\s*#?\s*diagnose\s+debug\s+crashlog\s+read\b/i.exec(text);
   if (cmdMatch) {
     const afterCmd = text.slice(cmdMatch.index + cmdMatch[0].length);
-    const nextPrompt = /\r?\n(?:\S+[#\$]\s*|#\s*|[a-zA-Z0-9_\-]+(?:\s*\([^\)]+\))?\s*#|(?:get|diagnose|show|config|execute)\s+)/i.exec(afterCmd);
+    const nextPrompt = /\r?\n(?:\S+[#$]\s*|#\s*|[a-zA-Z0-9_-]+(?:\s*\([^)]+\))?\s*#|(?:get|diagnose|show|config|execute)\s+)/i.exec(afterCmd);
     logText = nextPrompt ? afterCmd.slice(0, nextPrompt.index) : afterCmd;
   } else {
     const lines = text.split(/\r?\n/);
@@ -2107,7 +2040,7 @@ function checkFgtIpsecTunnels(text) {
 
   // 1. Parse Summary (Total vs Up)
   if (hasSummary) {
-    const tunnelRe = /^'([^']+)'\s+([\d\.:]+)\s+selectors\(total,up\):\s*(\d+)\/(\d+)/gm;
+    const tunnelRe = /^'([^']+)'\s+([\d.:]+)\s+selectors\(total,up\):\s*(\d+)\/(\d+)/gm;
     let m;
     while ((m = tunnelRe.exec(text)) !== null) {
       tunnelsMap.set(m[1], {
@@ -3232,9 +3165,12 @@ class FortiOSSyntaxParser {
         this.scopeStack.push({ type: 'edit', id: identifier });
       } else if (directive === 'next') {
         this.scopeStack.pop();
+        if (this.scopeStack.length === 1 && this.scopeStack[0].name === 'vdom') {
+          this.currentVdom = null;
+        }
       } else if (directive === 'end') {
         const popped = this.scopeStack.pop();
-        if (this.scopeStack.length === 0 || (popped && popped.type === 'config' && popped.name === 'global')) {
+        if (this.scopeStack.length === 0 || (popped && popped.type === 'config' && (popped.name === 'global' || popped.name === 'vdom'))) {
           this.currentVdom = null;
         }
       } else if (directive === 'set') {
@@ -3251,7 +3187,8 @@ class FortiOSSyntaxParser {
 
     if (!node) return;
 
-    for (const frame of this.scopeStack) {
+    for (let i = 0; i < this.scopeStack.length; i++) {
+      const frame = this.scopeStack[i];
       if (frame.type === 'config') {
         if (frame.name === 'vdom') continue;
         const parts = (frame.fullName || frame.name).split(/\s+/);
@@ -3260,66 +3197,16 @@ class FortiOSSyntaxParser {
           node = node[p];
         }
       } else if (frame.type === 'edit') {
+        // If this edit frame is directly inside 'config vdom', it selects the VDOM itself and should not be nested
+        if (i === 1 && this.scopeStack[0].type === 'config' && this.scopeStack[0].name === 'vdom') {
+          continue;
+        }
         if (!node[frame.id]) node[frame.id] = {};
         node = node[frame.id];
       }
     }
 
     node[key] = value.replace(/^["']|["']$/g, '');
-  }
-}
-
-class EntityGraphResolver {
-  constructor(ast) {
-    this.ast = ast;
-    this.addressGroups = {};
-    this.zones = {};
-    this.init();
-  }
-
-  init() {
-    const scopes = [this.ast.global, ...Object.values(this.ast.vdoms || {})].filter(Boolean);
-    for (const scope of scopes) {
-      const firewall = scope.firewall || {};
-      const addrgrp = firewall['addrgrp'] || firewall['address-group'] || {};
-      for (const [name, data] of Object.entries(addrgrp)) {
-        if (data && data.member) {
-          this.addressGroups[name] = data.member.split(/\s+/).map(m => m.replace(/["']/g, ''));
-        }
-      }
-
-      const system = scope.system || {};
-      const zones = system['zone'] || {};
-      for (const [name, data] of Object.entries(zones)) {
-        if (data && data.interface) {
-          this.zones[name] = data.interface.split(/\s+/).map(i => i.replace(/["']/g, ''));
-        }
-      }
-    }
-  }
-
-  resolveAddressGroup(groupName, visited = new Set()) {
-    if (visited.has(groupName)) return [];
-    visited.add(groupName);
-
-    const members = this.addressGroups[groupName] || [];
-    let resolved = [];
-
-    for (const m of members) {
-      if (this.addressGroups[m]) {
-        resolved.push(...this.resolveAddressGroup(m, visited));
-      } else {
-        resolved.push(m);
-      }
-    }
-    return resolved;
-  }
-
-  matchesZoneOrInterface(sourceTarget, interfaceName) {
-    if (sourceTarget === interfaceName) return true;
-    const members = this.zones[sourceTarget];
-    if (members && members.includes(interfaceName)) return true;
-    return false;
   }
 }
 
@@ -3461,6 +3348,21 @@ function checkCisDnsOverTls(text, ast) {
   });
 }
 
+function isUnhardenedTrusthost(val) {
+  if (!val || typeof val !== "string") return true;
+  const cleaned = val.trim().replace(/["']/g, "");
+  if (!cleaned) return true;
+  if (
+    cleaned === "0.0.0.0 0.0.0.0" ||
+    cleaned === "0.0.0.0/0" ||
+    cleaned === "0.0.0.0/0.0.0.0" ||
+    /^0\.0\.0\.0(?:\s+0\.0\.0\.0|\/0|\/0\.0\.0\.0)?$/i.test(cleaned)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function checkSecAdminMfa(text, ast) {
   if (!/(?:^|\n)\s*config\s+/i.test(text) && !/system\s+admin/i.test(text)) return null;
 
@@ -3472,9 +3374,18 @@ function checkSecAdminMfa(text, ast) {
     for (const [adminName, data] of Object.entries(admins)) {
       totalAdmins++;
       const twoFactor = (data['two-factor'] || data['two-factor-authentication'] || '').toLowerCase();
-      const trusthost = (data['trusthost1'] || data['trusthost'] || '');
-      if (!twoFactor || twoFactor === 'disable') {
-        if (!trusthost) {
+      const hasMfa = twoFactor && twoFactor !== 'disable';
+      if (!hasMfa) {
+        let hasHardenedTrusthost = false;
+        for (const [k, v] of Object.entries(data)) {
+          if (/^trusthost\d*$/i.test(k)) {
+            if (!isUnhardenedTrusthost(v)) {
+              hasHardenedTrusthost = true;
+              break;
+            }
+          }
+        }
+        if (!hasHardenedTrusthost) {
           unhardenedAdmins.push(adminName);
         }
       }
@@ -3490,8 +3401,16 @@ function checkSecAdminMfa(text, ast) {
         const m = block.match(/^["']?([a-zA-Z0-9_-]+)["']?/);
         const name = m ? m[1] : `admin_${i}`;
         const has2fa = /set\s+(?:two-factor|two-factor-authentication)\s+(?:enable|fortitoken|email|sms)/i.test(block);
-        const hasTrusthost = /set\s+trusthost\d*\s+\S+/i.test(block);
-        if (!has2fa && !hasTrusthost) {
+        const trusthostMatches = [...block.matchAll(/set\s+trusthost\d*\s+([^\r\n]+)/gi)];
+        let hasHardenedTrusthost = false;
+        for (const tm of trusthostMatches) {
+          const rawVal = tm[1].trim();
+          if (!isUnhardenedTrusthost(rawVal)) {
+            hasHardenedTrusthost = true;
+            break;
+          }
+        }
+        if (!has2fa && !hasHardenedTrusthost) {
           unhardenedAdmins.push(name);
         }
       }
@@ -4535,9 +4454,13 @@ class FortiOSConfigTokenizer {
 
   getSection(name, vdom = "root") {
     const lowerName = name.toLowerCase();
+
+    // 1. Direct match in requested vdom
     if (vdom && this.vdoms[vdom] && this.vdoms[vdom][lowerName]) {
       return this.vdoms[vdom][lowerName];
     }
+
+    // 2. Global / root priority for system-global sections
     const SYSTEM_GLOBAL_SECTIONS = new Set([
       "system global", "system ntp", "system dns", "system password-policy",
       "system snmp community", "system snmp user", "system snmp sysinfo",
@@ -4555,10 +4478,30 @@ class FortiOSConfigTokenizer {
         return this.sections[lowerName];
       }
     }
-    if (vdom && this.vdoms[vdom]) {
-      return null;
+
+    // 3. Fallback to global scope
+    if (this.vdoms["global"] && this.vdoms["global"][lowerName]) {
+      return this.vdoms["global"][lowerName];
     }
-    return this.sections[lowerName] || null;
+
+    // 4. Fallback to root scope
+    if (this.vdoms["root"] && this.vdoms["root"][lowerName]) {
+      return this.vdoms["root"][lowerName];
+    }
+
+    // 5. Fallback to flat sections map
+    if (this.sections[lowerName]) {
+      return this.sections[lowerName];
+    }
+
+    // 6. Deep search across all available VDOMs (Multi-VDOM support)
+    for (const v of this.getAllVdoms()) {
+      if (this.vdoms[v] && this.vdoms[v][lowerName]) {
+        return this.vdoms[v][lowerName];
+      }
+    }
+
+    return null;
   }
 
   getProperty(sectionName, key, vdom = "root") {
@@ -6350,7 +6293,7 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       (p) => (!p.vdom && vdom === "root") || p.vdom === vdom || candidateVdoms.length === 1
     );
     const vdomSslPolicies = vdomPolicies.filter((p) => {
-      const hasSslSrc = p.srcintf.some((intf) => /ssl(?:\.root|\-vpn|\.|$)/i.test(intf));
+      const hasSslSrc = p.srcintf.some((intf) => /ssl(?:\.root|-vpn|\.|$)/i.test(intf));
       return hasSslSrc && p.action === "accept";
     });
 
@@ -7057,7 +7000,7 @@ function checkCisAdmAdminPorts(tokenizer, text) {
 function checkCisSysHostname(tokenizer, text) {
   let hostname = tokenizer ? cleanVal(tokenizer.getSystemGlobalProperty("hostname") || tokenizer.getProperty("system global", "hostname")) : null;
   if (!hostname && text) {
-    const m = /(?:set\s+)?hostname\s*(?::\s*|\s+)"?([^"\r\n\s]+)/i.exec(text);
+    const m = /(?<![\w-])(?:set\s+)?hostname\s*(?::\s*|\s+)"?([^"\r\n\s]+)/i.exec(text);
     if (m) hostname = m[1];
   }
 
@@ -7077,7 +7020,10 @@ function checkCisSysHostname(tokenizer, text) {
     });
   }
 
-  const isDefault = !hostname || /^(FortiGate|FortiGate-\w+)$/i.test(hostname);
+  const isDefault = !hostname ||
+    /^(FortiGate|FortiGate-\w+)$/i.test(hostname) ||
+    /^FGT\w+/i.test(hostname) ||
+    /^FG[V\d]\w+/i.test(hostname);
   const remCli = "config system global\n    set hostname <Company>-FW-Primary\nend";
 
   if (isDefault) {
@@ -7213,44 +7159,64 @@ function checkCisAuthPasswordPolicy(tokenizer, text = "") {
   let reusePwd = getProp("reuse-password");
   let reusePwdLimit = getProp("reuse-password-limit");
 
-  if (!status && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+(?:status|status-global)\s+(\S+)/i.exec(text);
-    if (m) status = m[1];
-  }
-  if (!minLengthStr && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+(?:minimum-length|min-length)\s+([0-9]+)/i.exec(text);
-    if (m) minLengthStr = m[1];
-  }
-  if (!mustContain && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+must-contain\s+([^\n]+)/i.exec(text);
-    if (m) mustContain = m[1].trim();
-  }
-  if (!minLowerStr && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+min-lower-case-letter\s+([0-9]+)/i.exec(text);
-    if (m) minLowerStr = m[1];
-  }
-  if (!minUpperStr && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+min-upper-case-letter\s+([0-9]+)/i.exec(text);
-    if (m) minUpperStr = m[1];
-  }
-  if (!minNonAlphaStr && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+min-non-alphanumeric\s+([0-9]+)/i.exec(text);
-    if (m) minNonAlphaStr = m[1];
-  }
-  if (!minNumStr && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+min-number\s+([0-9]+)/i.exec(text);
-    if (m) minNumStr = m[1];
-  }
-  if (!reusePwd && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+reuse-password\s+(\S+)/i.exec(text);
-    if (m) reusePwd = m[1];
-  }
-  if (!reusePwdLimit && text) {
-    const m = /config\s+system\s+password-policy[\s\S]*?set\s+reuse-password-limit\s+([0-9]+)/i.exec(text);
-    if (m) reusePwdLimit = m[1];
+  const fullText = text || (tokenizer && tokenizer.rawText) || "";
+
+  // 1. Strictly bound search within 'config system password-policy ... end'
+  let policyBlock = "";
+  if (fullText) {
+    const blockMatch = /(?:^|\n)\s*config\s+system\s+password-policy\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(fullText);
+    if (blockMatch) {
+      policyBlock = blockMatch[1];
+    } else {
+      const cliMatch = /(?:^|\n)[^\n#$]*[#$]?\s*(?:get|show)\s+system\s+password-policy\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*end\b|$)/i.exec(fullText);
+      if (cliMatch) {
+        policyBlock = cliMatch[1];
+      }
+    }
   }
 
-  const hasPwdPolicy = tokenizer ? (!!tokenizer.getSystemSection("system password-policy") || !!tokenizer.getSection("system password-policy")) : /config\s+system\s+password-policy/i.test(text);
+  if (policyBlock) {
+    if (!status) {
+      const m = /(?:set\s+)?(?:status|status-global)\s*[:=]?\s*(\S+)/i.exec(policyBlock);
+      if (m) status = m[1];
+    }
+    if (!minLengthStr) {
+      const m = /(?:set\s+)?(?:minimum-length|min-length)\s*[:=]?\s*([0-9]+)/i.exec(policyBlock);
+      if (m) minLengthStr = m[1];
+    }
+    if (!mustContain) {
+      const m = /(?:set\s+)?must-contain\s*[:=]?\s*([^\r\n]+)/i.exec(policyBlock);
+      if (m) mustContain = m[1].trim();
+    }
+    if (!minLowerStr) {
+      const m = /(?:set\s+)?min-lower-case-letter\s*[:=]?\s*([0-9]+)/i.exec(policyBlock);
+      if (m) minLowerStr = m[1];
+    }
+    if (!minUpperStr) {
+      const m = /(?:set\s+)?min-upper-case-letter\s*[:=]?\s*([0-9]+)/i.exec(policyBlock);
+      if (m) minUpperStr = m[1];
+    }
+    if (!minNonAlphaStr) {
+      const m = /(?:set\s+)?min-non-alphanumeric\s*[:=]?\s*([0-9]+)/i.exec(policyBlock);
+      if (m) minNonAlphaStr = m[1];
+    }
+    if (!minNumStr) {
+      const m = /(?:set\s+)?min-number\s*[:=]?\s*([0-9]+)/i.exec(policyBlock);
+      if (m) minNumStr = m[1];
+    }
+    if (!reusePwd) {
+      const m = /(?:set\s+)?reuse-password\s*[:=]?\s*(\S+)/i.exec(policyBlock);
+      if (m) reusePwd = m[1];
+    }
+    if (!reusePwdLimit) {
+      const m = /(?:set\s+)?reuse-password-limit\s*[:=]?\s*([0-9]+)/i.exec(policyBlock);
+      if (m) reusePwdLimit = m[1];
+    }
+  }
+
+  const hasPwdPolicy = tokenizer
+    ? (!!tokenizer.getSystemSection("system password-policy") || !!tokenizer.getSection("system password-policy"))
+    : (!!policyBlock || /config\s+system\s+password-policy/i.test(fullText));
   const src = tokenizer ? "conf" : "cli";
   const remCli = "config system password-policy\n    set status enable\n    set minimum-length 12\n    set must-contain lower-case-letter non-alphanumeric number upper-case-letter\n    # Use 'reuse-password disable' for Pre-7.6, or 'reuse-password-limit 3' for 7.6+\n    set reuse-password disable\n    set login-lockout-upon-weaker-encryption enable\nend";
 
@@ -7325,9 +7291,155 @@ function checkCisMgmtSnmpCommunity(tokenizer, text = "") {
   const commList = [];
   const src = tokenizer ? "conf" : "cli";
 
-  // 1. Strictly isolate the block (?:config|show)\s+system\s+snmp\s+community([\s\S]*?)(?:^end|\n\s*end)
-  let blockText = "";
-  if (tokenizer && (tokenizer.getSystemSection("system snmp community") || tokenizer.getSection("system snmp community"))) {
+  const fullText = text || (tokenizer && tokenizer.rawText) || "";
+
+  function subnetMaskToCidr(mask) {
+    if (!mask) return null;
+    const octets = mask.trim().split(".").map(Number);
+    if (octets.length !== 4 || octets.some(n => isNaN(n) || n < 0 || n > 255)) {
+      return null;
+    }
+    let binary = "";
+    for (const octet of octets) {
+      binary += octet.toString(2).padStart(8, "0");
+    }
+    if (/^1*0*$/.test(binary)) {
+      return binary.indexOf("0") === -1 ? 32 : binary.indexOf("0");
+    }
+    return null;
+  }
+
+  function formatIpMask(ipStr) {
+    if (!ipStr) return "";
+    const parts = ipStr.trim().split(/\s+/);
+    if (parts.length >= 2) {
+      const ip = parts[0];
+      const mask = parts[1];
+      const cidr = subnetMaskToCidr(mask);
+      if (cidr !== null) {
+        return `${ip}/${cidr}`;
+      }
+      return `${ip}/${mask}`;
+    }
+    if (!parts[0].includes("/") && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(parts[0])) {
+      return `${parts[0]}/32`;
+    }
+    return parts[0];
+  }
+
+  function extractSnmpCommunityBlock(content) {
+    const lines = content.split(/\r?\n/);
+    let capturing = false;
+    let depth = 0;
+    const capturedLines = [];
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!capturing) {
+        if (/^(?:config|show)\s+system\s+snmp\s+community\b/i.test(line)) {
+          capturing = true;
+          depth = 1;
+        }
+        continue;
+      }
+
+      if (/^config\s+/i.test(line)) {
+        depth++;
+      } else if (/^end\b/i.test(line)) {
+        depth--;
+        if (depth === 0) {
+          break;
+        }
+      }
+      capturedLines.push(rawLine);
+    }
+
+    return capturedLines.join("\n");
+  }
+
+  const blockText = extractSnmpCommunityBlock(fullText);
+
+  if (blockText) {
+    const lines = blockText.split(/\r?\n/);
+    let curComm = null;
+    let inHosts = false;
+    let curHostIps = [];
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+
+      if (!curComm) {
+        const editMatch = /^edit\s+(?:"([^"]+)"|(\S+))/i.exec(line);
+        if (editMatch) {
+          curComm = {
+            id: editMatch[1] || editMatch[2],
+            name: "",
+            status: "enable",
+            hosts: ""
+          };
+          curHostIps = [];
+          inHosts = false;
+        }
+        continue;
+      }
+
+      // Detect inner config hosts block
+      if (/^config\s+hosts\b/i.test(line)) {
+        inHosts = true;
+        continue;
+      }
+
+      if (inHosts) {
+        if (/^end\b/i.test(line)) {
+          inHosts = false;
+          continue;
+        }
+        const ipMatch = /^set\s+ip(?:6)?\s+([^\r\n]+)/i.exec(line);
+        if (ipMatch) {
+          const rawIp = ipMatch[1].trim().replace(/["']/g, "");
+          curHostIps.push(formatIpMask(rawIp));
+        }
+        continue;
+      }
+
+      const nameMatch = /^set\s+name\s+(?:"([^"]+)"|(\S+))/i.exec(line);
+      if (nameMatch) {
+        curComm.name = nameMatch[1] || nameMatch[2];
+        continue;
+      }
+
+      const statusMatch = /^set\s+status\s+(\S+)/i.exec(line);
+      if (statusMatch) {
+        curComm.status = statusMatch[1].toLowerCase();
+        continue;
+      }
+
+      const hostsMatch = /^set\s+(?:hosts|hosts6)\s+([^\r\n]+)/i.exec(line);
+      if (hostsMatch) {
+        const rawHosts = hostsMatch[1].trim().replace(/["']/g, "");
+        curHostIps.push(rawHosts);
+        continue;
+      }
+
+      const singleIpMatch = /^set\s+ip(?:6)?\s+([^\r\n]+)/i.exec(line);
+      if (singleIpMatch) {
+        const rawIp = singleIpMatch[1].trim().replace(/["']/g, "");
+        curHostIps.push(formatIpMask(rawIp));
+        continue;
+      }
+
+      if (/^next\b/i.test(line)) {
+        curComm.hosts = curHostIps.length > 0 ? curHostIps.join(", ") : "Unrestricted (0.0.0.0/0)";
+        if (curComm.name) {
+          commList.push(curComm);
+        }
+        curComm = null;
+        curHostIps = [];
+        inHosts = false;
+      }
+    }
+  } else if (tokenizer && (tokenizer.getSystemSection("system snmp community") || tokenizer.getSection("system snmp community"))) {
     const entries = tokenizer.getEntries("system snmp community");
     for (const [id, entry] of Object.entries(entries)) {
       const origId = entry.name || entry._origKey || id;
@@ -7335,28 +7447,7 @@ function checkCisMgmtSnmpCommunity(tokenizer, text = "") {
       const status = cleanVal(entry.properties["status"] || "enable").toLowerCase();
       const hosts = cleanVal(entry.properties["hosts"] || entry.properties["hosts6"] || "");
       if (name) {
-        commList.push({ id: origId, name, status, hosts: hosts || "Unrestricted (0.0.0.0/0)" });
-      }
-    }
-  } else if (text) {
-    const snmpMatch = /(?:config|show)\s+system\s+snmp\s+community([\s\S]*?)(?:^end|\n\s*end)/im.exec(text);
-    if (snmpMatch) {
-      blockText = snmpMatch[1];
-      const editRe = /edit\s+(?:"([^"]+)"|(\d+|\S+))([\s\S]*?)next/gi;
-      let m;
-      while ((m = editRe.exec(blockText)) !== null) {
-        const id = m[1] || m[2];
-        const body = m[3];
-        const nameMatch = /set\s+name\s+(?:"([^"]+)"|(\S+))/i.exec(body);
-        const statusMatch = /set\s+status\s+(\S+)/i.exec(body);
-        const hostsMatch = /set\s+(?:hosts|hosts6)\s+([^\n]+)/i.exec(body);
-        const hostIpMatch = /set\s+ip\s+([^\n]+)/i.exec(body);
-        const name = nameMatch ? (nameMatch[1] || nameMatch[2]) : "";
-        const status = statusMatch ? statusMatch[1].toLowerCase() : "enable";
-        const hosts = hostsMatch ? hostsMatch[1].trim() : (hostIpMatch ? hostIpMatch[1].trim() : "");
-        if (name) {
-          commList.push({ id, name, status, hosts: hosts || "Unrestricted (0.0.0.0/0)" });
-        }
+        commList.push({ id: origId, name, status, hosts: hosts ? formatIpMask(hosts) : "Unrestricted (0.0.0.0/0)" });
       }
     }
   }
@@ -7843,6 +7934,8 @@ function checkCisAuthTrustedHosts(tokenizer, text = "") {
 function extractSystemGlobalScope(text) {
   if (!text) return "";
 
+  let combined = "";
+
   // 1. If Multi-VDOM with 'config global', extract inside 'config global ... end'
   const multiVdomMatch = /(?:^|\n)\s*config\s+global\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(text);
   const targetScope = multiVdomMatch ? multiVdomMatch[1] : text;
@@ -7850,22 +7943,24 @@ function extractSystemGlobalScope(text) {
   // 2. Extract 'config system global ... end' block
   const confBlockMatch = /(?:^|\n)\s*config\s+system\s+global\b([\s\S]*?)(?:\n\s*end\b|$)/i.exec(targetScope);
   if (confBlockMatch) {
-    return confBlockMatch[1];
+    combined += confBlockMatch[1] + "\n";
   }
 
   // 3. Extract CLI output: 'get system global' or 'show [full-configuration] system global'
   const cliBlockMatch = /(?:^|\n)[^\n#$]*[#$]\s*(?:get|show(?:\s+full-configuration)?)\s+system\s+global\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*end\b|$)/i.exec(text);
   if (cliBlockMatch) {
-    return cliBlockMatch[1];
+    combined += cliBlockMatch[1] + "\n";
   }
 
-  // Fallback: If 'get system global' appeared without prompt prefix
-  const getGlobalMatch = /(?:^|\n)\s*get\s+system\s+global\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*(?:get|show|diagnose|config)\s+|$)/i.exec(text);
-  if (getGlobalMatch) {
-    return getGlobalMatch[1];
+  // 4. Fallback: If 'get system global' appeared without prompt prefix
+  if (!cliBlockMatch) {
+    const getGlobalMatch = /(?:^|\n)\s*get\s+system\s+global\b([\s\S]*?)(?=(?:\r?\n)[^\n#$]+[#$]|\r?\n\s*(?:get|show|diagnose|config)\s+|$)/i.exec(text);
+    if (getGlobalMatch) {
+      combined += getGlobalMatch[1] + "\n";
+    }
   }
 
-  return "";
+  return combined;
 }
 
 function checkCisTlsStrongCrypto(tokenizer, text = "") {
@@ -8148,7 +8243,7 @@ function deduplicateFindings(rawFindings) {
 
   const deduped = [];
 
-  for (const [key, list] of grouped.entries()) {
+  for (const list of grouped.values()) {
     if (list.length === 1) {
       const item = list[0];
       const finalDev = normalizeApplianceName(item.appliance || item.deviceId || item.deviceName, "Primary-FW");
@@ -8513,10 +8608,6 @@ function extractDeviceMetadata(findings = [], kind = "conf", text = "") {
   };
 }
 
-function getCheckConfigPath(f) {
-  return (f && f.targetConfig) || getFindingTargetConfig(f);
-}
-
 /**
  * Maps finding or check ID to its FortiOS configuration path or CLI context.
  */
@@ -8608,7 +8699,7 @@ function formatFindingHtml(rawText) {
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    const bulletMatch = line.match(/^\s*[•\*\-]\s+(.*)$/);
+    const bulletMatch = line.match(/^\s*[•*-]\s+(.*)$/);
     if (bulletMatch) {
       if (!inList) {
         html += '<ul class="finding-bullets">';
@@ -8674,33 +8765,33 @@ function generateRichTextHtml(findings, kind, options = {}) {
     : "#475569";
 
   let html = `
-<div ${dirAttr} style="direction: ${"ltr"}; ${textAlign} font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; color: #1e293b;">
+<div ${dirAttr} style="direction: ltr; ${textAlign} font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 1.5; color: #1e293b;">
   <div style="border-bottom: 2px solid #0284c7; padding-bottom: 8px; margin-bottom: 12px;">
-    <div style="font-size: 11px; font-weight: 700; color: #0284c7; text-transform: uppercase; letter-spacing: 0.5px;">${"EXECUTIVE SOC AUDIT DELIVERABLE"}</div>
+    <div style="font-size: 11px; font-weight: 700; color: #0284c7; text-transform: uppercase; letter-spacing: 0.5px;">EXECUTIVE SOC AUDIT DELIVERABLE</div>
     <h2 style="margin: 2px 0 4px 0; color: #0f172a; font-size: 18px; font-weight: 700;">
-      ${"SecOps Health Check & Security Audit Report"}
+      SecOps Health Check & Security Audit Report
     </h2>
     <div style="font-size: 12px; color: #64748b;">${escapeHtml(scopeMap[kind] || ("Fortinet Infrastructure"))} | ${metadata.auditTimestamp}</div>
   </div>
 
   <table style="width: 100%; border-collapse: collapse; margin-bottom: 14px; font-size: 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 4px;">
     <tr>
-      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 20%;">${"Hostname:"}</td>
+      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 20%;">Hostname:</td>
       <td style="padding: 6px 10px; border: 1px solid #e2e8f0; color: #0f172a; font-weight: 600; width: 30%;">${escapeHtml(metadata.hostname)}</td>
-      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 20%;">${"Firmware / Build:"}</td>
+      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569; width: 20%;">Firmware / Build:</td>
       <td style="padding: 6px 10px; border: 1px solid #e2e8f0; color: #0f172a; width: 30%;">${escapeHtml(metadata.firmware)}${metadata.cleanVersion ? ` <a href="https://www.fortiguard.com/search?q=FortiOS+${metadata.cleanVersion}&engine=8" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline; font-size: 11px; margin-left: 4px;">[PSIRT]</a>` : ""}</td>
     </tr>
     <tr>
-      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569;">${"Serial Number:"}</td>
+      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Serial Number:</td>
       <td style="padding: 6px 10px; border: 1px solid #e2e8f0; color: #0f172a; font-family: monospace;">${escapeHtml(metadata.serial)}</td>
-      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569;">${"Auditor Engine:"}</td>
+      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569;">Auditor Engine:</td>
       <td style="padding: 6px 10px; border: 1px solid #e2e8f0; color: #0f172a;">${escapeHtml(metadata.auditorEngine)}</td>
     </tr>
     ${hasCisScore ? `
     <tr>
-      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569;">${"CIS Score:"}</td>
+      <td style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 600; color: #475569;">CIS Score:</td>
       <td colspan="3" style="padding: 6px 10px; border: 1px solid #e2e8f0; font-weight: 700; color: ${scoreColor};">
-        <span class="metric-cis">${options.cisScore}%</span> (${options.totalPassed || 0}/${options.totalEvaluated || 0} ${"controls passed"})
+        <span class="metric-cis">${options.cisScore}%</span> (${options.totalPassed || 0}/${options.totalEvaluated || 0} controls passed)
       </td>
     </tr>` : ""}
   </table>
@@ -8708,16 +8799,16 @@ function generateRichTextHtml(findings, kind, options = {}) {
   <div style="display: flex; gap: 8px; margin-bottom: 16px; font-size: 12px;">
     <div style="flex: 1; padding: 8px 10px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 4px; text-align: center;">
       <div style="color: #dc2626; font-weight: 700; font-size: 15px;">${failCount}</div>
-      <div style="color: #991b1b; font-size: 10.5px; text-transform: uppercase; font-weight: 600;">${"Critical / Fail"}</div>
+      <div style="color: #991b1b; font-size: 10.5px; text-transform: uppercase; font-weight: 600;">Critical / Fail</div>
     </div>
     <div style="flex: 1; padding: 8px 10px; background: #fffbeb; border: 1px solid #fde68a; border-radius: 4px; text-align: center;">
       <div style="color: #d97706; font-weight: 700; font-size: 15px;">${warnCount}</div>
-      <div style="color: #92400e; font-size: 10.5px; text-transform: uppercase; font-weight: 600;">${"Warnings"}</div>
+      <div style="color: #92400e; font-size: 10.5px; text-transform: uppercase; font-weight: 600;">Warnings</div>
     </div>
     ${!issuesOnly ? `
     <div style="flex: 1; padding: 8px 10px; background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 4px; text-align: center;">
       <div style="color: #059669; font-weight: 700; font-size: 15px;">${passCount}</div>
-      <div style="color: #065f46; font-size: 10.5px; text-transform: uppercase; font-weight: 600;">${"Passing"}</div>
+      <div style="color: #065f46; font-size: 10.5px; text-transform: uppercase; font-weight: 600;">Passing</div>
     </div>` : ""}
   </div>
 `;
@@ -8727,7 +8818,7 @@ function generateRichTextHtml(findings, kind, options = {}) {
   <h3 style="margin: 16px 0 8px 0; font-size: 13.5px; font-weight: 700; color: #dc2626; border-bottom: 1px solid #fee2e2; padding-bottom: 4px;">
     ${`Critical Items Requiring Immediate SOC Action (${fails.length})`}
   </h3>
-  <ul style="margin: 0 0 14px 0; padding-${"left"}: 20px;">
+  <ul style="margin: 0 0 14px 0; padding-left: 20px;">
 `;
     for (const f of fails) {
       const statusLabel = "CRITICAL";
@@ -8738,22 +8829,22 @@ function generateRichTextHtml(findings, kind, options = {}) {
     <li style="margin-bottom: 14px;">
       <div style="margin-bottom: 4px;">
         <span style="background: #fee2e2; color: #991b1b; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700;">${statusLabel}</span>
-        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-${"left"}: 4px;">${devBadge}</span>
-        <strong style="margin-${"left"}: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
+        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-left: 4px;">${devBadge}</span>
+        <strong style="margin-left: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
       </div>
-      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>${"Diagnostic CLI:"}</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-${"right"}: 8px;">${escapeHtml(diagCmd)}</code> <strong>${"Target Config:"}</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
+      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>Diagnostic CLI:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-right: 8px;">${escapeHtml(diagCmd)}</code> <strong>Target Config:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
       <div style="color: #334155; line-height: 1.6; font-size: 12.5px;">${formatFindingHtml(f.findingText)}</div>
       ${
         f.actionText
           ? `<div style="margin-top: 6px; padding: 6px 10px; background: #f8fafc; ${actionBorder} font-size: 12px; color: #0f172a;">
-              <strong style="color: #059669; text-transform: uppercase; font-size: 10.5px;">${"SOC Action Required:"}</strong> ${escapeHtml(f.actionText)}
+              <strong style="color: #059669; text-transform: uppercase; font-size: 10.5px;">SOC Action Required:</strong> ${escapeHtml(f.actionText)}
              </div>`
           : ""
       }
       ${
         f.remediationCli
           ? `<div style="margin-top: 6px; padding: 6px 10px; background: #0b1118; border: 1px solid #223040; border-radius: 4px; font-family: monospace; font-size: 11px; color: #38bdf8; white-space: pre; direction: ltr; text-align: left;">
-              <strong style="color: #94a3b8; display: block; margin-bottom: 3px; font-size: 10px; text-transform: uppercase;">${"Remediation CLI:"}</strong>${escapeHtml(f.remediationCli)}
+              <strong style="color: #94a3b8; display: block; margin-bottom: 3px; font-size: 10px; text-transform: uppercase;">Remediation CLI:</strong>${escapeHtml(f.remediationCli)}
              </div>`
           : ""
       }
@@ -8768,7 +8859,7 @@ function generateRichTextHtml(findings, kind, options = {}) {
   <h3 style="margin: 16px 0 8px 0; font-size: 13.5px; font-weight: 700; color: #d97706; border-bottom: 1px solid #fef3c7; padding-bottom: 4px;">
     ${`Security Warnings & Operational Risks (${warns.length})`}
   </h3>
-  <ul style="margin: 0 0 14px 0; padding-${"left"}: 20px;">
+  <ul style="margin: 0 0 14px 0; padding-left: 20px;">
 `;
     for (const f of warns) {
       const statusLabel = "WARNING";
@@ -8779,22 +8870,22 @@ function generateRichTextHtml(findings, kind, options = {}) {
     <li style="margin-bottom: 14px;">
       <div style="margin-bottom: 4px;">
         <span style="background: #fef3c7; color: #92400e; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700;">${statusLabel}</span>
-        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-${"left"}: 4px;">${devBadge}</span>
-        <strong style="margin-${"left"}: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
+        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-left: 4px;">${devBadge}</span>
+        <strong style="margin-left: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
       </div>
-      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>${"Diagnostic CLI:"}</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-${"right"}: 8px;">${escapeHtml(diagCmd)}</code> <strong>${"Target Config:"}</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
+      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>Diagnostic CLI:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-right: 8px;">${escapeHtml(diagCmd)}</code> <strong>Target Config:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
       <div style="color: #334155; line-height: 1.6; font-size: 12.5px;">${formatFindingHtml(f.findingText)}</div>
       ${
         f.actionText
           ? `<div style="margin-top: 6px; padding: 6px 10px; background: #f8fafc; ${actionBorder} font-size: 12px; color: #0f172a;">
-              <strong style="color: #059669; text-transform: uppercase; font-size: 10.5px;">${"SOC Action Required:"}</strong> ${escapeHtml(f.actionText)}
+              <strong style="color: #059669; text-transform: uppercase; font-size: 10.5px;">SOC Action Required:</strong> ${escapeHtml(f.actionText)}
              </div>`
           : ""
       }
       ${
         f.remediationCli
           ? `<div style="margin-top: 6px; padding: 6px 10px; background: #0b1118; border: 1px solid #223040; border-radius: 4px; font-family: monospace; font-size: 11px; color: #38bdf8; white-space: pre; direction: ltr; text-align: left;">
-              <strong style="color: #94a3b8; display: block; margin-bottom: 3px; font-size: 10px; text-transform: uppercase;">${"Remediation CLI:"}</strong>${escapeHtml(f.remediationCli)}
+              <strong style="color: #94a3b8; display: block; margin-bottom: 3px; font-size: 10px; text-transform: uppercase;">Remediation CLI:</strong>${escapeHtml(f.remediationCli)}
              </div>`
           : ""
       }
@@ -8809,7 +8900,7 @@ function generateRichTextHtml(findings, kind, options = {}) {
   <h3 style="margin: 16px 0 8px 0; font-size: 13.5px; font-weight: 700; color: #059669; border-bottom: 1px solid #d1fae5; padding-bottom: 4px;">
     ${`Verified Healthy Controls & Passing Checks (${passes.length})`}
   </h3>
-  <ul style="margin: 0 0 14px 0; padding-${"left"}: 20px;">
+  <ul style="margin: 0 0 14px 0; padding-left: 20px;">
 `;
     for (const f of passes) {
       const statusLabel = "PASS";
@@ -8820,10 +8911,10 @@ function generateRichTextHtml(findings, kind, options = {}) {
     <li style="margin-bottom: 10px;">
       <div style="margin-bottom: 4px;">
         <span style="background: #d1fae5; color: #065f46; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700;">${statusLabel}</span>
-        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-${"left"}: 4px;">${devBadge}</span>
-        <strong style="margin-${"left"}: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
+        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-left: 4px;">${devBadge}</span>
+        <strong style="margin-left: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
       </div>
-      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>${"Diagnostic CLI:"}</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-${"right"}: 8px;">${escapeHtml(diagCmd)}</code> <strong>${"Target Config:"}</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
+      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>Diagnostic CLI:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-right: 8px;">${escapeHtml(diagCmd)}</code> <strong>Target Config:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
       <div style="color: #334155; line-height: 1.6; font-size: 12.5px;">${formatFindingHtml(f.findingText)}</div>
     </li>
 `;
@@ -8834,9 +8925,9 @@ function generateRichTextHtml(findings, kind, options = {}) {
   if (!issuesOnly && infos.length > 0) {
     html += `
   <h3 style="margin: 16px 0 8px 0; font-size: 13.5px; font-weight: 700; color: #0284c7; border-bottom: 1px solid #e0f2fe; padding-bottom: 4px;">
-    ${"SecOps Operational Guidance"}
+    SecOps Operational Guidance
   </h3>
-  <ul style="margin: 0 0 14px 0; padding-${"left"}: 20px;">
+  <ul style="margin: 0 0 14px 0; padding-left: 20px;">
 `;
     for (const f of infos) {
       const statusLabel = "INFO";
@@ -8847,10 +8938,10 @@ function generateRichTextHtml(findings, kind, options = {}) {
     <li style="margin-bottom: 10px;">
       <div style="margin-bottom: 4px;">
         <span style="background: #e0f2fe; color: #075985; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700;">${statusLabel}</span>
-        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-${"left"}: 4px;">${devBadge}</span>
-        <strong style="margin-${"left"}: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
+        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-left: 4px;">${devBadge}</span>
+        <strong style="margin-left: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
       </div>
-      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>${"Diagnostic CLI:"}</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-${"right"}: 8px;">${escapeHtml(diagCmd)}</code> <strong>${"Target Config:"}</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
+      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>Diagnostic CLI:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-right: 8px;">${escapeHtml(diagCmd)}</code> <strong>Target Config:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
       <div style="color: #334155; line-height: 1.6; font-size: 12.5px;">${formatFindingHtml(f.findingText)}</div>
       ${
         f.actionText
@@ -8865,7 +8956,7 @@ function generateRichTextHtml(findings, kind, options = {}) {
 
   html += `
   <div style="margin-top: 18px; padding-top: 8px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #94a3b8;">
-    ${"Report generated by SecOps Security Engine v3.2"}
+    Report generated by SecOps Security Engine v3.2
   </div>
 </div>
 `;
@@ -8879,18 +8970,11 @@ function generateRichTextHtml(findings, kind, options = {}) {
  * Supports dual-language (EN / HE) and issues-only filtering.
  */
 function generateCleanPlainText(findings, kind, options = {}) {
-  const lang = options.lang || "en";
   const issuesOnly = options.issuesOnly || false;
 
-  let activeFindings = issuesOnly
+  const activeFindings = issuesOnly
     ? findings.filter((f) => f.status === "FAIL" || f.status === "WARN")
     : findings;
-
-  if (lang === "he") {
-    activeFindings = activeFindings.map((f) => getLocalizedFinding(f, "he"));
-  }
-
-  const isHe = lang === "he";
   const dateStr = new Date().toISOString().replace("T", " ").substring(0, 19) + " UTC";
   const passCount = activeFindings.filter((f) => f.status === "PASS").length;
   const warnCount = activeFindings.filter((f) => f.status === "WARN").length;
@@ -8938,19 +9022,19 @@ function generateCleanPlainText(findings, kind, options = {}) {
       const statusTag = "[FAIL]";
       const dev = f.deviceId || f.deviceName || "Primary-FW";
       lines.push(`* ${statusTag} [${dev}] [${f.id}] ${f.component}`);
-      lines.push(`  ${"Diagnostic CLI:"} ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
-      lines.push(`  ${"Target Config:"}  ${getFindingTargetConfig(f)}`);
+      lines.push(`  Diagnostic CLI: ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
+      lines.push(`  Target Config:  ${getFindingTargetConfig(f)}`);
       if (!f.findingText.includes("\n")) {
-        lines.push(`  ${"Finding:"} ${f.findingText}`);
+        lines.push(`  Finding: ${f.findingText}`);
       } else {
-        lines.push(`  ${"Finding:"}`);
+        lines.push(`  Finding:`);
         f.findingText.split("\n").forEach((l) => lines.push(`    ${l}`));
       }
       if (f.actionText) {
-        lines.push(`  ${"SOC Action:"} ${f.actionText}`);
+        lines.push(`  SOC Action: ${f.actionText}`);
       }
       if (f.remediationCli) {
-        lines.push(`  ${"Remediation CLI:"}`);
+        lines.push(`  Remediation CLI:`);
         f.remediationCli.split("\n").forEach((l) => lines.push(`    ${l}`));
       }
       lines.push("");
@@ -8965,19 +9049,19 @@ function generateCleanPlainText(findings, kind, options = {}) {
       const statusTag = "[WARN]";
       const dev = f.deviceId || f.deviceName || "Primary-FW";
       lines.push(`* ${statusTag} [${dev}] [${f.id}] ${f.component}`);
-      lines.push(`  ${"Diagnostic CLI:"} ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
-      lines.push(`  ${"Target Config:"}  ${getFindingTargetConfig(f)}`);
+      lines.push(`  Diagnostic CLI: ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
+      lines.push(`  Target Config:  ${getFindingTargetConfig(f)}`);
       if (!f.findingText.includes("\n")) {
-        lines.push(`  ${"Finding:"} ${f.findingText}`);
+        lines.push(`  Finding: ${f.findingText}`);
       } else {
-        lines.push(`  ${"Finding:"}`);
+        lines.push(`  Finding:`);
         f.findingText.split("\n").forEach((l) => lines.push(`    ${l}`));
       }
       if (f.actionText) {
-        lines.push(`  ${"SOC Action:"} ${f.actionText}`);
+        lines.push(`  SOC Action: ${f.actionText}`);
       }
       if (f.remediationCli) {
-        lines.push(`  ${"Remediation CLI:"}`);
+        lines.push(`  Remediation CLI:`);
         f.remediationCli.split("\n").forEach((l) => lines.push(`    ${l}`));
       }
       lines.push("");
@@ -8993,12 +9077,12 @@ function generateCleanPlainText(findings, kind, options = {}) {
         const statusTag = "[PASS]";
         const dev = f.deviceId || f.deviceName || "Primary-FW";
         lines.push(`* ${statusTag} [${dev}] [${f.id}] ${f.component}`);
-        lines.push(`  ${"Diagnostic CLI:"} ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
-        lines.push(`  ${"Target Config:"}  ${getFindingTargetConfig(f)}`);
+        lines.push(`  Diagnostic CLI: ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
+        lines.push(`  Target Config:  ${getFindingTargetConfig(f)}`);
         if (!f.findingText.includes("\n")) {
-          lines.push(`  ${"Finding:"} ${f.findingText}`);
+          lines.push(`  Finding: ${f.findingText}`);
         } else {
-          lines.push(`  ${"Finding:"}`);
+          lines.push(`  Finding:`);
           f.findingText.split("\n").forEach((l) => lines.push(`    ${l}`));
         }
       }
@@ -9013,16 +9097,16 @@ function generateCleanPlainText(findings, kind, options = {}) {
         const statusTag = "[INFO]";
         const dev = f.deviceId || f.deviceName || "Primary-FW";
         lines.push(`* ${statusTag} [${dev}] [${f.id}] ${f.component}`);
-        lines.push(`  ${"Diagnostic CLI:"} ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
-        lines.push(`  ${"Target Config:"}  ${getFindingTargetConfig(f)}`);
+        lines.push(`  Diagnostic CLI: ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
+        lines.push(`  Target Config:  ${getFindingTargetConfig(f)}`);
         if (!f.findingText.includes("\n")) {
-          lines.push(`  ${"Finding:"} ${f.findingText}`);
+          lines.push(`  Finding: ${f.findingText}`);
         } else {
-          lines.push(`  ${"Finding:"}`);
+          lines.push(`  Finding:`);
           f.findingText.split("\n").forEach((l) => lines.push(`    ${l}`));
         }
         if (f.actionText) {
-          lines.push(`  ${"Guidance:"} ${f.actionText}`);
+          lines.push(`  Guidance: ${f.actionText}`);
         }
       }
       lines.push("");
@@ -9037,13 +9121,6 @@ function generateCleanPlainText(findings, kind, options = {}) {
 }
 
 /**
- * Backwards compatibility alias for generating report text without markdown asterisks.
- */
-function generateClickUpReport(findings, kind, options = {}) {
-  return generateCleanPlainText(findings, kind, options);
-}
-
-/**
  * Generates standalone, beautifully styled executive HTML report.
  * Enterprise SOC-grade typography and structured finding cards.
  * Zero emojis, self-contained responsive CSS with dark/light mode and clean print styles.
@@ -9052,16 +9129,11 @@ function generateClickUpReport(findings, kind, options = {}) {
 function generateStandaloneHtmlDocument(findings, kind, options = {}) {
   const lang = options.lang || "en";
   const issuesOnly = options.issuesOnly || false;
-  const isHe = lang === "he";
   const dateStr = new Date().toISOString().replace("T", " ").substring(0, 19) + " UTC";
 
-  let activeFindings = issuesOnly
+  const activeFindings = issuesOnly
     ? findings.filter((f) => f.status === "FAIL" || f.status === "WARN")
     : findings;
-
-  if (lang === "he") {
-    activeFindings = activeFindings.map((f) => getLocalizedFinding(f, "he"));
-  }
 
   const passCount = activeFindings.filter((f) => f.status === "PASS").length;
   const warnCount = activeFindings.filter((f) => f.status === "WARN").length;
@@ -9119,22 +9191,22 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
           <span class="badge ${badgeClass}">${statusLabel}</span>
           <span class="card-rule-title"><strong>[${escapeHtml(f.id)}]</strong> ${escapeHtml(f.component)}</span>
         </div>
-        <span class="card-device-badge card-device-pill"><strong>${"Appliance:"}</strong> <code>${escapeHtml(f.deviceId || f.deviceName || "Primary-FW")}</code></span>
+        <span class="card-device-badge card-device-pill"><strong>Appliance:</strong> <code>${escapeHtml(f.deviceId || f.deviceName || "Primary-FW")}</code></span>
         <div class="card-meta-row">
-          <span class="meta-item"><strong>${"Diagnostic CLI:"}</strong> <code class="cli-cmd-badge">${escapeHtml(f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status")}</code></span>
-          <span class="meta-item"><strong>${"Target Config:"}</strong> <code class="config-path">${escapeHtml(targetConfig)}</code></span>
+          <span class="meta-item"><strong>Diagnostic CLI:</strong> <code class="cli-cmd-badge">${escapeHtml(f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status")}</code></span>
+          <span class="meta-item"><strong>Target Config:</strong> <code class="config-path">${escapeHtml(targetConfig)}</code></span>
         </div>
       </div>
       <div class="card-body">
         <div class="section-block observed-state">
-          <div class="block-title">${"Observed Configuration State:"}</div>
+          <div class="block-title">Observed Configuration State:</div>
           <div class="finding-text">${formatFindingHtml(f.findingText)}</div>
         </div>
         ${
           f.actionText
             ? `
         <div class="section-block soc-action">
-          <div class="block-title">${"SOC Impact & Action Required:"}</div>
+          <div class="block-title">SOC Impact & Action Required:</div>
           <div class="action-text">${escapeHtml(f.actionText)}</div>
         </div>`
             : ""
@@ -9144,8 +9216,8 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
             ? `
         <div class="section-block remediation-cli card-remediation-cli">
           <div class="remediation-header">
-            <span class="remediation-title">${"Remediation CLI Commands:"}</span>
-            <button class="copy-cli-btn" type="button" onclick="copyCliBlock(this)">${"Copy CLI"}</button>
+            <span class="remediation-title">Remediation CLI Commands:</span>
+            <button class="copy-cli-btn" type="button" onclick="copyCliBlock(this)">Copy CLI</button>
           </div>
           <pre class="cli-code"><code>${escapeHtml(f.remediationCli)}</code></pre>
         </div>`
@@ -9161,7 +9233,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     cardsHtml += `
     <div class="finding-section">
       <div class="section-title section-title-fail">
-        <span>${"Critical Items Requiring Immediate SOC Action"}</span>
+        <span>Critical Items Requiring Immediate SOC Action</span>
         <span class="section-count">${fails.length}</span>
       </div>
       ${fails.map(renderCard).join("")}
@@ -9172,7 +9244,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     cardsHtml += `
     <div class="finding-section">
       <div class="section-title section-title-warn">
-        <span>${"Security Warnings & Operational Risks"}</span>
+        <span>Security Warnings & Operational Risks</span>
         <span class="section-count">${warns.length}</span>
       </div>
       ${warns.map(renderCard).join("")}
@@ -9183,7 +9255,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     cardsHtml += `
     <div class="finding-section">
       <div class="section-title section-title-pass">
-        <span>${"Verified Healthy Controls & Passing Checks"}</span>
+        <span>Verified Healthy Controls & Passing Checks</span>
         <span class="section-count">${passes.length}</span>
       </div>
       ${passes.map(renderCard).join("")}
@@ -9194,7 +9266,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     cardsHtml += `
     <div class="finding-section">
       <div class="section-title section-title-info">
-        <span>${"SecOps Operational Guidance"}</span>
+        <span>SecOps Operational Guidance</span>
         <span class="section-count">${infos.length}</span>
       </div>
       ${infos.map(renderCard).join("")}
@@ -9202,7 +9274,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
   }
 
   const htmlDoc = `<!DOCTYPE html>
-<html lang="${lang}" dir="${"ltr"}">
+<html lang="${lang}" dir="ltr">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9276,7 +9348,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
       padding: 36px 20px;
       display: flex;
       justify-content: center;
-      ${"direction: ltr; text-align: left;"}
+      direction: ltr; text-align: left;
     }
     .report-container {
       max-width: 920px;
@@ -9339,7 +9411,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     .meta-table th {
       background: var(--table-bg);
       color: var(--text-secondary);
-      text-align: ${"left"};
+      text-align: left;
       padding: 8px 12px;
       font-weight: 600;
       border: 1px solid var(--border);
@@ -9422,12 +9494,12 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
       margin-bottom: 14px;
       box-shadow: var(--card-shadow);
       overflow: hidden;
-      ${"border-left: 4px solid var(--border);"}
+      border-left: 4px solid var(--border);
     }
-    .card-status-fail { ${"border-left-color: #ef4444;"} }
-    .card-status-warn { ${"border-left-color: #f59e0b;"} }
-    .card-status-pass { ${"border-left-color: #10b981;"} }
-    .card-status-info { ${"border-left-color: #0ea5e9;"} }
+    .card-status-fail { border-left-color: #ef4444; }
+    .card-status-warn { border-left-color: #f59e0b; }
+    .card-status-pass { border-left-color: #10b981; }
+    .card-status-info { border-left-color: #0ea5e9; }
 
     .card-header {
       padding: 10px 14px;
@@ -9545,7 +9617,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
       background: rgba(16, 185, 129, 0.05);
       padding: 10px 12px;
       border-radius: 4px;
-      ${"border-left: 3px solid #10b981;"}
+      border-left: 3px solid #10b981;
     }
     .soc-action .block-title {
       color: #059669;
@@ -9649,9 +9721,9 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
   <div class="report-container">
     <div class="report-header">
       <div>
-        <div class="header-eyebrow">${"EXECUTIVE SOC AUDIT DELIVERABLE"}</div>
-        <h1 class="header-title">${"SecOps Health Check & Security Audit Report"}</h1>
-        <div class="header-subtitle">${"Enterprise Fortinet Infrastructure Assessment & CIS Hardening Benchmark"}</div>
+        <div class="header-eyebrow">EXECUTIVE SOC AUDIT DELIVERABLE</div>
+        <h1 class="header-title">SecOps Health Check & Security Audit Report</h1>
+        <div class="header-subtitle">Enterprise Fortinet Infrastructure Assessment & CIS Hardening Benchmark</div>
       </div>
       <div>
         <span class="engine-badge">${escapeHtml(metadata.auditorEngine)}</span>
@@ -9661,21 +9733,21 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     <table class="meta-table">
       <tbody>
         <tr>
-          <th>${"Device Hostname"}</th>
+          <th>Device Hostname</th>
           <td><strong>${escapeHtml(metadata.hostname)}</strong></td>
-          <th>${"Firmware Build"}</th>
+          <th>Firmware Build</th>
           <td>${escapeHtml(metadata.firmware)}${metadata.cleanVersion ? ` <a href="https://www.fortiguard.com/search?q=FortiOS+${metadata.cleanVersion}&engine=8" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline; font-size: 11px; margin-left: 4px;">[PSIRT]</a>` : ""}</td>
         </tr>
         <tr>
-          <th>${"Serial Number"}</th>
+          <th>Serial Number</th>
           <td><code>${escapeHtml(metadata.serial)}</code></td>
-          <th>${"Audit Scope"}</th>
+          <th>Audit Scope</th>
           <td>${escapeHtml(scopeMap[kind] || ("Fortinet Infrastructure"))}</td>
         </tr>
         <tr>
-          <th>${"Audit Timestamp"}</th>
+          <th>Audit Timestamp</th>
           <td>${escapeHtml(metadata.auditTimestamp)}</td>
-          <th>${"Compliance Score"}</th>
+          <th>Compliance Score</th>
           <td><span class="score-badge ${scoreClass}">${hasCisScore ? `${options.cisScore}% (${options.totalPassed || 0}/${options.totalEvaluated || 0})` : "N/A"}</span></td>
         </tr>
       </tbody>
@@ -9683,21 +9755,21 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
 
     <div class="badge-bar">
       <div class="metric-pill metric-fail">
-        <span class="metric-label">${"Critical / Failed"}</span>
+        <span class="metric-label">Critical / Failed</span>
         <span class="metric-value">${failCount}</span>
       </div>
       <div class="metric-pill metric-warn">
-        <span class="metric-label">${"Warnings"}</span>
+        <span class="metric-label">Warnings</span>
         <span class="metric-value">${warnCount}</span>
       </div>
       ${issuesOnly ? "" : `
       <div class="metric-pill metric-pass">
-        <span class="metric-label">${"Passing Checks"}</span>
+        <span class="metric-label">Passing Checks</span>
         <span class="metric-value">${passCount}</span>
       </div>`}
       ${hasCisScore ? `
       <div class="metric-pill metric-cis">
-        <span class="metric-label">${"CIS Score"}</span>
+        <span class="metric-label">CIS Score</span>
         <span class="metric-value">${options.cisScore}%</span>
       </div>` : ""}
     </div>
@@ -9705,7 +9777,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     ${cardsHtml}
 
     <div class="report-footer">
-      <span>${"Generated by SecOps Health Check &amp; Config Analyzer"}</span>
+      <span>Generated by SecOps Health Check &amp; Config Analyzer</span>
       <span>${escapeHtml(metadata.auditTimestamp)}</span>
     </div>
   </div>
@@ -9719,7 +9791,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
       var text = code.innerText || code.textContent;
       navigator.clipboard.writeText(text).then(function() {
         var orig = btn.innerText;
-        btn.innerText = "${"Copied!"}";
+        btn.innerText = "Copied!";
         btn.classList.add("copied");
         setTimeout(function() {
           btn.innerText = orig;
@@ -9733,7 +9805,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
         document.execCommand("copy");
         document.body.removeChild(ta);
         var orig = btn.innerText;
-        btn.innerText = "${"Copied!"}";
+        btn.innerText = "Copied!";
         setTimeout(function() { btn.innerText = orig; }, 2000);
       });
     }
@@ -9954,6 +10026,8 @@ const DOM = {
   summaryCountText: document.getElementById("summaryCountText"),
   browseBtn: document.getElementById("browseBtn"),
   verifiedText: document.getElementById("verifiedText"),
+  auditModeBadge: document.getElementById("auditModeBadge"),
+  appVersionBadge: document.getElementById("appVersionBadge"),
 };
 
 let currentFindings = [];
@@ -9963,10 +10037,14 @@ let issuesOnly = false;
 try {
   const savedLang = localStorage.getItem("secops_lang");
   if (savedLang === "en") currentLang = savedLang;
-} catch (e) {}
+} catch (e) {
+  console.warn("localStorage unavailable:", e);
+}
 try {
   issuesOnly = localStorage.getItem("secops_issues_only") === "true";
-} catch (e) {}
+} catch (e) {
+  console.warn("localStorage unavailable:", e);
+}
 
 function showToast(m) {
   if (!DOM.toast) return;
@@ -10141,11 +10219,16 @@ function setLanguage(lang = "en") {
   currentLang = lang || "en";
   try {
     localStorage.setItem("secops_lang", currentLang);
-  } catch (e) {}
+  } catch (e) {
+    console.warn("localStorage unavailable:", e);
+  }
 
-  if (DOM.langEnBtn && DOM.langHeBtn) {
-    DOM.langEnBtn.classList.toggle("is-active", currentLang === "en");
-    DOM.langHeBtn.classList.toggle("is-active", false);
+  if (DOM.auditModeBadge) {
+    DOM.auditModeBadge.textContent = "56 Controls (Full Audit)";
+  }
+  const ver = (typeof chrome !== "undefined" && chrome?.runtime?.getManifest?.()?.version) || "3.5.0";
+  if (DOM.appVersionBadge) {
+    DOM.appVersionBadge.textContent = `v${ver}`;
   }
 
   const appEl = document.querySelector(".app") || document.body;
@@ -10223,8 +10306,8 @@ function renderFindings(findings) {
           <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="1.5">
             <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
           </svg>
-          <p class="empty-title" style="color: #34d399;">${"All Checks Passed Cleanly!"}</p>
-          <p class="empty-desc">${"No warnings or critical failures detected across analyzed inputs."}</p>
+          <p class="empty-title" style="color: #34d399;">All Checks Passed Cleanly!</p>
+          <p class="empty-desc">No warnings or critical failures detected across analyzed inputs.</p>
         </div>
       </td>
     `;
@@ -10251,8 +10334,8 @@ function renderFindings(findings) {
         <line x1="12" y1="8" x2="12.01" y2="8"></line>
       </svg>
       <div>
-        <strong>${"Static Configuration Backup Detected (Delta Configuration):"}</strong>
-        ${" Standard FortiOS backups omit factory default values. Compliant defaults (e.g. admin timeout, NTP sync) are evaluated according to vendor baseline standards."}
+        <strong>Static Configuration Backup Detected (Delta Configuration):</strong>
+         Standard FortiOS backups omit factory default values. Compliant defaults (e.g. admin timeout, NTP sync) are evaluated according to vendor baseline standards.
       </div>
     `;
     deltaBanner.style.display = "flex";
@@ -10281,7 +10364,7 @@ function renderFindings(findings) {
               <line x1="6" y1="6" x2="6.01" y2="6"></line>
               <line x1="6" y1="18" x2="6.01" y2="18"></line>
             </svg>
-            <span>${"Device / Asset:"} ${escapeHtml(devId)}</span>
+            <span>Device / Asset: ${escapeHtml(devId)}</span>
           </div>
         </td>
       `;
@@ -10330,8 +10413,8 @@ function renderFindings(findings) {
     const diagCmd = f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status";
     const cfgPath = f.targetConfig || getFindingTargetConfig(f);
     metaRow.innerHTML = `
-      <span class="meta-item"><strong>${"Diagnostic CLI:"}</strong> <code class="cli-cmd-badge">${escapeHtml(diagCmd)}</code></span>
-      <span class="meta-item"><strong>${"Target Config:"}</strong> <code class="config-path">${escapeHtml(cfgPath)}</code></span>
+      <span class="meta-item"><strong>Diagnostic CLI:</strong> <code class="cli-cmd-badge">${escapeHtml(diagCmd)}</code></span>
+      <span class="meta-item"><strong>Target Config:</strong> <code class="config-path">${escapeHtml(cfgPath)}</code></span>
     `;
     tdFindings.appendChild(metaRow);
 
@@ -10450,24 +10533,51 @@ function syncAggregatedInput() {
   updateVerifiedHash(aggregated);
 }
 
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB hard limit
+const WARN_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB warning threshold
+
 async function handleFiles(fileList) {
   if (!fileList || !fileList.length) return;
 
   const validExtensions = [".txt", ".log", ".conf", ".cfg"];
   const newFiles = [];
+  let skippedDuplicates = 0;
+  let oversizedFiles = 0;
 
   for (let i = 0; i < fileList.length; i++) {
     const file = fileList[i];
     const lower = file.name.toLowerCase();
     const isValid = validExtensions.some((ext) => lower.endsWith(ext));
 
-    if (isValid) {
-      newFiles.push(file);
+    if (!isValid) continue;
+
+    // Reject files over 20MB limit
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      oversizedFiles++;
+      showToast(`File '${file.name}' exceeds 20MB limit and was skipped.`);
+      continue;
     }
+
+    // Skip duplicates already loaded
+    const isDuplicate = loadedFiles.some((f) => f.name === file.name && f.size === file.size);
+    if (isDuplicate) {
+      skippedDuplicates++;
+      showToast(`File '${file.name}' is already loaded.`);
+      continue;
+    }
+
+    // Warn for files over 10MB
+    if (file.size > WARN_FILE_SIZE_BYTES) {
+      showToast(`File '${file.name}' is large (>10MB). Processing may take a moment.`);
+    }
+
+    newFiles.push(file);
   }
 
   if (newFiles.length === 0) {
-    showToast("Unsupported file(s). Please drop .txt, .log, .conf, or .cfg");
+    if (oversizedFiles === 0 && skippedDuplicates === 0) {
+      showToast("Unsupported file(s). Please drop .txt, .log, .conf, or .cfg");
+    }
     return;
   }
 
@@ -10483,7 +10593,11 @@ async function handleFiles(fileList) {
           content: e.target.result || "",
         });
       };
-      reader.onerror = () => resolve(null);
+      reader.onerror = (err) => {
+        console.error(`Failed to read file ${file.name}:`, err);
+        showToast(`Error reading file: ${file.name}`);
+        resolve(null);
+      };
       reader.readAsText(file);
     });
   });
@@ -10495,7 +10609,9 @@ async function handleFiles(fileList) {
   renderFileChips();
   syncAggregatedInput();
 
-  showToast(`Loaded ${validResults.length} file(s)`);
+  if (validResults.length > 0) {
+    showToast(`Loaded ${validResults.length} file(s)`);
+  }
 }
 
 function clearAllFiles() {
@@ -10513,7 +10629,6 @@ function clearAllFiles() {
 
 function renderCheatsheet() {
   DOM.cheatsheetGroups.innerHTML = "";
-  const isHe = currentLang === "he";
 
   for (const group of CHEAT_SHEET_GROUPS) {
     const groupEl = document.createElement("div");
@@ -10542,7 +10657,7 @@ function renderCheatsheet() {
           <path d="M8 3a1 1 0 011-1h2a1 1 0 110 2H9a1 1 0 01-1-1z" />
           <path d="M6 3a2 2 0 00-2 2v11a2 2 0 002 2h8a2 2 0 002-2V5a2 2 0 00-2-2 3 3 0 01-3 2H9a3 3 0 01-3-2z" />
         </svg>
-        ${"Copy Verified 1-Click Bundle"}
+        Copy Verified 1-Click Bundle
       `;
 
       copyAllBtn.addEventListener("click", async (ev) => {
@@ -10574,7 +10689,7 @@ function renderCheatsheet() {
           <span class="cheatsheet-cmd">${escapeHtml(item.cmd)}</span>
           <span class="cheatsheet-desc">&bull; ${escapeHtml(itemDesc)}</span>
         </div>
-        <span class="cheatsheet-copy-hint">${"Copy"}</span>
+        <span class="cheatsheet-copy-hint">Copy</span>
       `;
 
       btn.addEventListener("click", async () => {
@@ -10616,17 +10731,6 @@ function initEvents() {
   DOM.tabBtnAnalyzer.addEventListener("click", () => switchTab("analyzer"));
   DOM.tabBtnCheatsheet.addEventListener("click", () => switchTab("cheatsheet"));
 
-  // Language Switching Buttons
-  if (DOM.langEnBtn) {
-    DOM.langEnBtn.addEventListener("click", () => setLanguage("en"));
-  }
-  if (DOM.langHeBtn) {
-    DOM.langHeBtn.addEventListener("click", () => setLanguage("he"));
-  }
-
-  // Audit Profile Mode Controls
-  
-
   // Dual Workspace Tab Toggle: HTML Report vs Plain Text
   if (DOM.tabBtnHtml) {
     DOM.tabBtnHtml.addEventListener("click", () => switchWorkspaceView("html"));
@@ -10661,16 +10765,15 @@ function initEvents() {
     });
   }
 
-  // Audit Profile Dropdown Selector (compatibility fallback)
-  
-
   // Filter: Issues Only Toggle
   if (DOM.filterIssuesOnly) {
     DOM.filterIssuesOnly.addEventListener("change", (e) => {
       issuesOnly = e.target.checked;
       try {
         localStorage.setItem("secops_issues_only", issuesOnly ? "true" : "false");
-      } catch (err) {}
+      } catch (err) {
+        console.warn("localStorage unavailable:", err);
+      }
       renderFindings(currentFindings);
       updateSummaryCounters(currentFindings);
       if (DOM.plainTextOutput && currentFindings.length > 0) {
