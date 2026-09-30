@@ -83,8 +83,8 @@ function extractDeviceIdentity(text, defaultName = "Primary-FW") {
     if (norm && norm !== ":" && norm !== "Primary-FW") return norm;
   }
 
-  // 2. Configuration file: set hostname or hostname
-  const hostConfMatches = [...text.matchAll(/(?:set\s+hostname|hostname)\s+["']?([^"'\r\n\s]+)["']?/gi)];
+  // 2. Configuration file: set hostname or hostname (bounded to avoid matching server-hostname)
+  const hostConfMatches = [...text.matchAll(/(?:set\s+hostname|(?<![\w-])hostname)\s+["']?([^"'\r\n\s]+)["']?/gi)];
   for (const hm of hostConfMatches) {
     const norm = normalizeApplianceName(hm[1], "");
     if (norm && norm !== ":" && !/^(?:FortiGate|FortiGate-\w+)$/i.test(norm)) return norm;
@@ -98,7 +98,17 @@ function extractDeviceIdentity(text, defaultName = "Primary-FW") {
     if (norm && norm !== ":") return norm;
   }
 
-  // 4. Serial number
+  // 4. CLI prompt extraction: e.g. "FW-01 #" or "Branch-FW (root) #"
+  const promptMatches = [...text.matchAll(/(?:^|\n)\s*([A-Za-z0-9_.-]+)(?:\s*\([^)]+\))?\s*#/g)];
+  for (const pm of promptMatches) {
+    const candidate = pm[1].trim();
+    if (/^(?:config|show|edit|next|end|set|get|diagnose|execute)$/i.test(candidate)) continue;
+    const norm = normalizeApplianceName(candidate, "");
+    if (norm && norm !== ":" && !/^(?:FortiGate|FortiGate-\w+)$/i.test(norm)) return norm;
+    if (norm && norm !== ":") return norm;
+  }
+
+  // 5. Serial number
   const serialMatches = [...text.matchAll(/(?:Serial-Number|serial)\s*[:=]\s*([A-Za-z0-9_-]+)/gi)];
   for (const sm of serialMatches) {
     const norm = normalizeApplianceName(sm[1], "");
@@ -241,18 +251,18 @@ function makeFinding(optionsOrId, ...args) {
     const actionText = args[3] || "";
     let remediationCli = "";
     let category = "";
-    let source = "cli";
+    let source = "conf";
     let targetConfig = "";
 
     if (args.length >= 6) {
       // Positional with 8 arguments: (id, component, status, findingText, actionText, remCli, category, source)
       remediationCli = args[4] || "";
       category = args[5] || "";
-      source = args[6] || "cli";
+      source = args[6] || "conf";
       targetConfig = args[7] || "";
     } else {
       // Positional with <= 5 arguments: (id, component, status, findingText, actionText, source, targetConfig)
-      source = args[4] || "cli";
+      source = args[4] || "conf";
       targetConfig = args[5] || "";
     }
 
@@ -545,7 +555,7 @@ function extractCommandOutput(text, commandPattern) {
   const cmdStr = typeof commandPattern === "string" 
     ? commandPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     : commandPattern.source;
-  const cmdRegex = new RegExp(`(?:^|[#$]|\\n)\\s*${cmdStr}[^\\r\\n]*\\r?\\n([\\s\\S]*?)(?=(?:\\r?\\n[A-Za-z0-9_.-]+(?:\\s*\\([^)]+\\))?\\s*[#$]|\\n\\s*--More--|$))`, "i");
+  const cmdRegex = new RegExp(`(?:^|[#$]|\\n)\\s*${cmdStr}[^\\r\\n]*([\\s\\S]*?)(?=\\r?\\n[A-Za-z0-9_.-]+(?:\\s*\\([^)]+\\))?\\s*[#$]|\\r?\\n\\s*(?:get|show|diagnose|execute)\\s+\\S|\\n\\s*--More--|$)`, "i");
   const match = cmdRegex.exec(text);
   return match && match[1] ? match[1].trim() : "";
 }
@@ -1599,7 +1609,16 @@ function checkFgtCrashlogHistory(text) {
 
   function parseCrashDate(dateStr) {
     if (!dateStr) return null;
-    const d = new Date(dateStr.replace(" ", "T") + "Z");
+    const parts = dateStr.trim().split(/[\sT]+/);
+    if (parts.length >= 2) {
+      const ymd = parts[0].split("-").map((n) => parseInt(n, 10));
+      const hms = parts[1].split(":").map((n) => parseInt(n, 10));
+      if (ymd.length === 3 && hms.length >= 2) {
+        const d = new Date(ymd[0], ymd[1] - 1, ymd[2], hms[0], hms[1], hms[2] || 0);
+        if (!isNaN(d.getTime())) return d;
+      }
+    }
+    const d = new Date(dateStr.replace(" ", "T"));
     return isNaN(d.getTime()) ? null : d;
   }
 
@@ -1661,11 +1680,15 @@ function checkFgtCrashlogHistory(text) {
     }
 
     d.totalCrashes += count;
+    // Exactly 1 crash occurred at the specified dateStr (the latest event),
+    // while remaining (count - 1) crashes occurred historically.
+    const recentCount = 1;
+
     if (hoursAgo <= 24) {
-      d.crashesLast24h += count;
+      d.crashesLast24h += recentCount;
     }
     if (hoursAgo <= 168) {
-      d.crashesLast7d += count;
+      d.crashesLast7d += recentCount;
     }
 
     if (crashDate && (!d.latestDate || crashDate.getTime() > d.latestDate.getTime())) {
@@ -1909,12 +1932,15 @@ function checkFgtCrashlogHistory(text) {
  * PASS: HA Health is OK and all members are in-sync with identical checksums.
  */
 function checkFgtHaStatus(text) {
-  if (!hasCommand(text, "get system ha status") && !/HA\s+Health\s+Status/i.test(text)) {
+  // Extract strictly from the specific get system ha status command output if present
+  let targetText = extractCommandOutput(text, "get system ha status");
+  if (!targetText) targetText = text;
+
+  if (!hasCommand(text, "get system ha status") && !/HA\s+Health\s+Status/i.test(targetText)) {
     return null;
   }
 
-  // Handle standalone mode gracefully if present
-  const modeMatch = /Mode:\s*([A-Za-z0-9_-]+)/i.exec(text);
+  const modeMatch = /Mode:\s*([A-Za-z0-9_-]+)/i.exec(targetText);
   if (modeMatch && modeMatch[1].toLowerCase() === "standalone") {
     return makeFinding({
       id: "FGT-HA-01",
@@ -1926,14 +1952,12 @@ function checkFgtHaStatus(text) {
     });
   }
 
-  // Flexible regex handling multiple spaces, non-breaking spaces (\u00A0), and optional spacing before ':'
-  const healthMatch = /HA\s+Health\s+Status\s*[:=]\s*([A-Za-z]+)/i.exec(text);
+  const healthMatch = /HA\s+Health\s+Status\s*[:=]\s*([A-Za-z]+)/i.exec(targetText);
   const health = healthMatch ? healthMatch[1].trim() : null;
 
-  const hasInSync = /\bin-sync\b/i.test(text);
-  const hasOutOfSync = /\bout-of-sync\b/i.test(text);
+  const hasInSync = /\bin-sync\b/i.test(targetText);
+  const hasOutOfSync = /\bout-of-sync\b/i.test(targetText);
 
-  // Cluster is healthy if explicitly OK, or if members report in-sync without out-of-sync
   const isHealthy = (health && health.toLowerCase() === "ok") || (hasInSync && !hasOutOfSync);
 
   if (!isHealthy || hasOutOfSync) {
@@ -2183,14 +2207,14 @@ function checkFgtSdwanSla(text) {
   const members = [];
   const lines = text.split(/\r?\n/);
   for (const line of lines) {
-    const intfM = /(?:interface|member|link)[:\s]+([a-zA-Z0-9_.-]+)/i.exec(line);
+    const intfM = /(?:interface|member|link)[:\s]+([a-zA-Z0-9_.-]+)|Seq\(\d+\s+([a-zA-Z0-9_.-]+)\)/i.exec(line);
     const stateM = /state[:(]?\s*(alive|dead)/i.exec(line);
     const lossM = /(?:packet-loss|loss)[:(]?\s*([0-9.]+)%/i.exec(line);
-    const latM = /(?:latency|rtt)[:(]?\s*([0-9.]+)\s*ms/i.exec(line);
+    const latM = /(?:latency|rtt)[:(]?\s*([0-9.]+)(?:\s*ms)?/i.exec(line);
 
     if (stateM || (lossM && latM)) {
       members.push({
-        interface: intfM ? intfM[1] : `member-${members.length + 1}`,
+        interface: intfM ? (intfM[1] || intfM[2]) : `member-${members.length + 1}`,
         state: stateM ? stateM[1].toLowerCase() : (lossM && parseFloat(lossM[1]) < 100 ? "alive" : "dead"),
         loss: lossM ? parseFloat(lossM[1]) : 0,
         latency: latM ? parseFloat(latM[1]) : 0
@@ -2201,7 +2225,7 @@ function checkFgtSdwanSla(text) {
   if (!members.length) {
     const stateMatches = [...text.matchAll(/state[:(]\s*(alive|dead)\)?/gi)].map((m) => m[1].toLowerCase());
     const lossMatches = [...text.matchAll(/packet-loss[:(]\s*([0-9.]+)%\)?/gi)].map((m) => parseFloat(m[1]));
-    const latencyMatches = [...text.matchAll(/latency[:(]\s*([0-9.]+)\s*ms\)?/gi)].map((m) => parseFloat(m[1]));
+    const latencyMatches = [...text.matchAll(/latency[:(]\s*([0-9.]+)(?:\s*ms)?\)?/gi)].map((m) => parseFloat(m[1]));
     const count = Math.max(stateMatches.length, lossMatches.length, latencyMatches.length);
     for (let i = 0; i < count; i++) {
       members.push({
@@ -2389,15 +2413,21 @@ function checkFgtThreatFeeds(text, tokenizer = null) {
   const problems = [];
   for (const feed of feeds) {
     const statusMatch = feed.status ? null : /status\s*:\s*(\S+)/i.exec(feed.body || "");
-    const status = feed.status || (statusMatch ? statusMatch[1].toLowerCase() : "unknown");
+    const status = feed.status || (statusMatch ? statusMatch[1].toLowerCase() : "enable");
     const hasError = feed.hasError || /(unreachable|error|failed|timeout|failure)/i.test(feed.body || "");
-    const isDisabled = feed.isDisabled !== undefined ? feed.isDisabled : (status && !/enable|active/.test(status));
+
+    let isDisabled = false;
+    if (feed.isDisabled !== undefined) {
+      isDisabled = feed.isDisabled;
+    } else {
+      isDisabled = /(?:status|state)\s*[:=]?\s*(?:disable)/i.test(feed.body || "") || status === "disable";
+    }
 
     if (isDisabled || hasError) {
       problems.push({
         name: feed.name,
         status: status,
-        details: hasError ? "sync failure / unreachable" : (isDisabled ? "disabled" : "inactive")
+        details: hasError ? "sync failure / unreachable" : "disabled"
       });
     }
   }
@@ -2571,15 +2601,21 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
   const users = [];
 
   if (tokenizer) {
-    const userSection = tokenizer.getSection("user local");
-    if (userSection && Object.keys(userSection.entries).length > 0) {
-      for (const [name, entry] of Object.entries(userSection.entries)) {
-        users.push({
-          name,
-          type: (entry.properties["type"] || "password").replace(/^"+|"+$/g, "").toLowerCase(),
-          twoFactor: entry.properties["two-factor"] ? entry.properties["two-factor"].replace(/^"+|"+$/g, "").toLowerCase() : null,
-          source: "conf",
-        });
+    const vdomList = tokenizer.getAllVdoms();
+    const vdomsToCheck = vdomList.length > 0 ? vdomList : ["root"];
+    for (const v of vdomsToCheck) {
+      const userSection = tokenizer.getSection("user local", v);
+      if (userSection && Object.keys(userSection.entries).length > 0) {
+        for (const [name, entry] of Object.entries(userSection.entries)) {
+          if (!users.some((u) => u.name === name)) {
+            users.push({
+              name,
+              type: (entry.properties["type"] || "password").replace(/^"+|"+$/g, "").toLowerCase(),
+              twoFactor: entry.properties["two-factor"] ? entry.properties["two-factor"].replace(/^"+|"+$/g, "").toLowerCase() : null,
+              source: "conf",
+            });
+          }
+        }
       }
     }
   }
@@ -2591,8 +2627,9 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
       targetText = text.slice(configIdx);
     }
 
-    const sectionMatch = /(?:config|show)\s+user\s+local\b([\s\S]*?)(?:\n\s*end\b|#\s*[a-z]|$)/i.exec(targetText) ||
-                         /user\s+local\b([\s\S]*?)(?:\n\s*end\b|#\s*[a-z]|$)/i.exec(targetText);
+    // Safer regex for extracting the block that won't trip on internal comment hashes
+    const sectionMatch = /(?:config|show)\s+user\s+local\b([\s\S]*?)(?:\r?\n\s*end\b|\r?\n\s*[A-Za-z0-9_.-]+(?:\s*\([^)]+\))?\s*#|$)/i.exec(targetText) ||
+                         /user\s+local\b([\s\S]*?)(?:\r?\n\s*end\b|\r?\n\s*[A-Za-z0-9_.-]+(?:\s*\([^)]+\))?\s*#|$)/i.exec(targetText);
 
     const blockText = sectionMatch ? sectionMatch[1] : targetText;
     const blockRe = /edit\s+(?:"([^"]+)"|(\S+))([\s\S]*?)(?:next|(?=edit\s+)|$)/gi;
@@ -2615,7 +2652,6 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
 
   const primarySource = users.some((u) => u.source === "cli") ? "cli" : "conf";
 
-  // Check for global SAML configuration
   const hasSamlSection = tokenizer
     ? (!!tokenizer.getSection("user saml") || !!tokenizer.getSection("system saml"))
     : /(?:config|show)\s+(?:user|system)\s+saml/i.test(text);
@@ -2623,7 +2659,7 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
   const hasGlobalSaml = hasSamlSection || hasSamlType;
 
   const insecurePasswordAccounts = [];
-  const singleFactorLdapAccounts = [];
+  const remoteAuthAccounts = [];
   const compliantMfaAccounts = [];
 
   for (const user of users) {
@@ -2639,96 +2675,72 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
     } else {
       if (type === "password" || type === "local") {
         insecurePasswordAccounts.push(user.name);
-      } else if (type === "ldap") {
-        singleFactorLdapAccounts.push(user.name);
+      } else if (type === "ldap" || type === "radius" || type.startsWith("tacacs")) {
+        remoteAuthAccounts.push(user.name);
       }
     }
   }
 
   const remCli = [
     "config user local",
-    '    edit "<username>"',
+    '    edit ""',
     "        set two-factor fortitoken",
-    '        set fortitoken "<token-serial>"',
-    '        set email-to "<user@domain.com>"',
+    '        set fortitoken ""',
+    '        set email-to ""',
     "    next",
     "end"
   ].join("\n");
 
   const actionText =
-    "Enforce FortiToken Mobile or Email MFA on all remaining LDAP users, audit and remove obsolete test/admin accounts (e.g., 'test_user', 'vendor_vpn'), or migrate SSL-VPN authentication to SAML (Microsoft Entra ID / Okta) with centralized Conditional Access MFA.";
+    "Enforce FortiToken Mobile or Email MFA on all local password users. Ensure remote RADIUS/LDAP users are challenged with MFA at the IdP/Server level.";
 
-  // Global SAML enforced
-  if (hasGlobalSaml && insecurePasswordAccounts.length === 0 && singleFactorLdapAccounts.length === 0) {
-    return makeFinding({
-      id: "SEC-USER-01",
-      component: "User Authentication & MFA",
-      status: "PASS",
-      category: "SecOps Operational",
-      source: primarySource,
-      data: { isSaml: true, insecurePasswordAccounts, singleFactorLdapAccounts, compliantMfaAccounts },
-      findingText: "Corporate Multi-Factor Authentication is globally enforced via SAML Identity Provider (Microsoft Entra ID / Okta). Centralized Conditional Access MFA is active.",
-      actionText: "",
-      remediationCli: remCli,
-    });
-  }
-
-  // 100% compliant accounts
-  if (insecurePasswordAccounts.length === 0 && singleFactorLdapAccounts.length === 0) {
-    return makeFinding({
-      id: "SEC-USER-01",
-      component: "User Authentication & MFA",
-      status: "PASS",
-      category: "SecOps Operational",
-      source: primarySource,
-      data: { isSaml: false, insecurePasswordAccounts, singleFactorLdapAccounts, compliantMfaAccounts },
-      findingText: `All ${compliantMfaAccounts.length} defined local and domain user account(s) have Multi-Factor Authentication (two-factor) enabled.`,
-      actionText: "",
-      remediationCli: remCli,
-    });
-  }
-
-  // Severity decision: FAIL if any local password lacks MFA OR > 5 LDAP accounts lack MFA
-  const isFail = insecurePasswordAccounts.length > 0 || singleFactorLdapAccounts.length > 5;
+  const isFail = insecurePasswordAccounts.length > 0;
   const header = isFail
     ? "Critical Incomplete MFA Coverage on FortiGate:"
-    : "Incomplete MFA Coverage on FortiGate:";
+    : "Local Authentication Review:";
 
   const lines = [header];
   if (insecurePasswordAccounts.length > 0) {
-    lines.push(
-      `  • Insecure Local Password Accounts (${insecurePasswordAccounts.length}): ${formatAccountList(insecurePasswordAccounts)}`
-    );
-  }
-  if (singleFactorLdapAccounts.length > 0) {
-    lines.push(
-      `  • Single-Factor LDAP Accounts (${singleFactorLdapAccounts.length}): ${formatAccountList(singleFactorLdapAccounts)}`
-    );
+    lines.push(`  • Insecure Local Password Accounts (${insecurePasswordAccounts.length}): ${formatAccountList(insecurePasswordAccounts)}`);
   }
   if (compliantMfaAccounts.length > 0) {
-    lines.push(
-      `  • Compliant MFA Accounts (${compliantMfaAccounts.length}): ${formatAccountList(compliantMfaAccounts)}`
-    );
+    lines.push(`  • Compliant MFA Accounts (${compliantMfaAccounts.length}): ${formatAccountList(compliantMfaAccounts)}`);
+  }
+  if (remoteAuthAccounts.length > 0) {
+    lines.push(`  • Remote Auth (LDAP/RADIUS) Accounts (${remoteAuthAccounts.length}): ${formatAccountList(remoteAuthAccounts)}`);
+    lines.push(`    * Note: MFA status for remote users cannot be verified from local config. Ensure MFA is enforced on the remote authentication server.`);
+  }
+  
+  if (hasGlobalSaml) {
+     lines.push("\nNote: A SAML configuration is present on the device, suggesting SSO may be utilized for primary authentication. However, local accounts mapped directly in the configuration must still be secured with FortiToken to prevent bypasses.");
   }
 
   lines.push("");
-  if (singleFactorLdapAccounts.length > 0) {
-    lines.push(
-      "Impact: Single-factor LDAP users authenticate via standard domain credentials only, bypassing multi-factor verification on the SSL-VPN gateway."
-    );
-  } else {
-    lines.push(
-      "Impact: Local password accounts authenticate via single-factor static credentials only, vulnerable to brute-force attacks and compromised credentials."
-    );
+  if (insecurePasswordAccounts.length > 0) {
+    lines.push("Impact: Local password accounts authenticate via single-factor static credentials only, vulnerable to brute-force attacks and compromised credentials.");
+  }
+
+  if (!isFail && insecurePasswordAccounts.length === 0) {
+    return makeFinding({
+      id: "SEC-USER-01",
+      component: "User Authentication & MFA",
+      status: remoteAuthAccounts.length > 0 ? "INFO" : "PASS",
+      category: "SecOps Operational",
+      source: primarySource,
+      data: { isSaml: hasGlobalSaml, insecurePasswordAccounts, remoteAuthAccounts, compliantMfaAccounts },
+      findingText: lines.join("\n"),
+      actionText: remoteAuthAccounts.length > 0 ? "Verify MFA enforcement on RADIUS/LDAP servers." : "",
+      remediationCli: remCli,
+    });
   }
 
   return makeFinding({
     id: "SEC-USER-01",
     component: "User Authentication & MFA",
-    status: isFail ? "FAIL" : "WARN",
+    status: "FAIL",
     category: "SecOps Operational",
     source: primarySource,
-    data: { isSaml: false, insecurePasswordAccounts, singleFactorLdapAccounts, compliantMfaAccounts },
+    data: { isSaml: hasGlobalSaml, insecurePasswordAccounts, remoteAuthAccounts, compliantMfaAccounts },
     findingText: lines.join("\n"),
     actionText,
     remediationCli: remCli,
@@ -2745,15 +2757,28 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
 function checkFgtBanList(text) {
   const hasBanCmd =
     hasCommand(text, "diagnose user ban list") ||
-    /diagnose user ban list/i.test(text);
+    /diagnose\s+user\s+ban\s+list/i.test(text);
 
-  if (!hasBanCmd && !/ban list/i.test(text)) return null;
+  if (!hasBanCmd) return null;
 
-  const headingMatch = /diagnose user ban list[^\n]*\n([\s\S]*?)(?:\n\s*\n|#\s*$|$)/i.exec(text);
-  const block = headingMatch ? headingMatch[1] : text;
+  const block = extractCommandOutput(text, "diagnose user ban list");
+  if (!block || !block.trim()) {
+    return makeFinding({
+      id: "FGT-BAN-01",
+      component: "FortiGate Banned IPs",
+      status: "PASS",
+      findingText: "No active IP bans found in quarantine table (0 banned source IPs).",
+      actionText: "",
+      source: "cli",
+    });
+  }
 
-  const ipRe = /\b(?:src-ip-addr\s*[:=]\s*)?((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)){3})\b/g;
-  const matches = [...block.matchAll(ipRe)].map((m) => m[1]);
+  const ipRe = /\b(?:src-ip-addr\s*[:=]\s*)((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)){3})\b/g;
+  let matches = [...block.matchAll(ipRe)].map((m) => m[1]);
+  if (!matches.length) {
+    const rawIpRe = /^\s*((?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]\d|\d)){3})\b/gm;
+    matches = [...block.matchAll(rawIpRe)].map((m) => m[1]);
+  }
   const uniqueIps = [...new Set(matches.filter((ip) => ip !== "0.0.0.0" && ip !== "255.255.255.255"))];
 
   if (uniqueIps.length > 0) {
@@ -3205,7 +3230,7 @@ class FortiOSSyntaxParser {
     for (let i = 0; i < this.scopeStack.length; i++) {
       const frame = this.scopeStack[i];
       if (frame.type === 'config') {
-        if (frame.name === 'vdom') continue;
+        if (frame.name === 'vdom' || (i === 0 && frame.name === 'global')) continue;
         const parts = (frame.fullName || frame.name).split(/\s+/);
         for (const p of parts) {
           if (!node[p]) node[p] = {};
@@ -3229,8 +3254,65 @@ class FortiOSSyntaxParser {
 // 15 DEEP RESEARCH CHECKS (METAPLAN AUDIT SPECIFICATION)
 // ---------------------------------------------------------------------
 
+function isFullBackup(text) {
+  return /^#(?:config-version|conf_file_ver)=/im.test(text);
+}
+
+function checkCisAutoInstall(text, ast) {
+  const present = /config\s+system\s+auto-install\b/i.test(text);
+  const src = ast && Object.keys(ast.global || {}).length > 0 ? "conf" : "cli";
+  if (!present && !isFullBackup(text)) {
+    return makeFinding({
+      id: "CIS-HIGH-01",
+      component: "USB Firmware/Config Auto-Install",
+      status: "NOT_EVALUATED",
+      category: "CIS Benchmark",
+      source: src,
+      data: {},
+      findingText: "Control not evaluated: Section 'config system auto-install' is missing from configuration backup.",
+      actionText: "Include 'config system auto-install' in configuration export to evaluate.",
+      remediationCli: ""
+    });
+  }
+
+  const autoInstall = (ast && ast.global && ((ast.global.system && ast.global.system['auto-install']) || ast.global['system auto-install'])) || {};
+  const autoImage = (autoInstall['auto-install-image'] || '').toLowerCase();
+  const autoConfig = (autoInstall['auto-install-config'] || '').toLowerCase();
+
+  const isHardened = (autoImage === 'disable' || /set\s+auto-install-image\s+disable/i.test(text)) &&
+                     (autoConfig === 'disable' || /set\s+auto-install-config\s+disable/i.test(text));
+
+  return makeFinding({
+    id: "CIS-HIGH-01",
+    component: "USB Firmware/Config Auto-Install",
+    status: isHardened ? "PASS" : "FAIL",
+    findingText: isHardened
+      ? "USB Auto-Installation of firmware images and configuration files is disabled."
+      : "Insecure USB auto-install parameters detected. Unauthorized physical USB insertion could compromise system integrity.",
+    actionText: "Disable USB automatic firmware and configuration installation.",
+    remediationCli: `config system auto-install\n    set auto-install-image disable\n    set auto-install-config disable\nend`,
+    diagnosticCmd: DIAGNOSTIC_COMMANDS["CIS-HIGH-01"],
+    targetConfig: "config system auto-install",
+    source: src
+  });
+}
+
 function checkCisBanners(text, ast) {
-  if (!/(?:^|\n)\s*config\s+/i.test(text) && !/banner/i.test(text)) return null;
+  const present = /(?:^|\n)\s*config\s+/i.test(text) || /banner/i.test(text);
+  const src = ast && Object.keys(ast.global || {}).length > 0 ? "conf" : "cli";
+  if (!present && !isFullBackup(text)) {
+    return makeFinding({
+      id: "CIS-MED-01",
+      component: "System Global Banners",
+      status: "NOT_EVALUATED",
+      category: "CIS Benchmark",
+      source: src,
+      data: {},
+      findingText: "Control not evaluated: Section missing from configuration.",
+      actionText: "",
+      remediationCli: ""
+    });
+  }
 
   const global = (ast && ast.global && ((ast.global.system && ast.global.system.global) || ast.global['system global'])) || {};
   const preBanner = (global['pre-login-banner'] || '').toLowerCase();
@@ -3250,36 +3332,27 @@ function checkCisBanners(text, ast) {
     actionText: "Enable legal warning banners across all administrative entry points.",
     remediationCli: `config system global\n    set pre-login-banner enable\n    set post-login-banner enable\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["CIS-MED-01"],
-    targetConfig: "config system global"
-  });
-}
-
-function checkCisAutoInstall(text, ast) {
-  if (!/(?:^|\n)\s*config\s+/i.test(text) && !/auto-install/i.test(text)) return null;
-
-  const autoInstall = (ast && ast.global && ((ast.global.system && ast.global.system['auto-install']) || ast.global['system auto-install'])) || {};
-  const autoImage = (autoInstall['auto-install-image'] || '').toLowerCase();
-  const autoConfig = (autoInstall['auto-install-config'] || '').toLowerCase();
-
-  const isHardened = (autoImage === 'disable' || !/set\s+auto-install-image\s+enable/i.test(text)) &&
-                     (autoConfig === 'disable' || !/set\s+auto-install-config\s+enable/i.test(text));
-
-  return makeFinding({
-    id: "CIS-HIGH-01",
-    component: "USB Firmware/Config Auto-Install",
-    status: isHardened ? "PASS" : "FAIL",
-    findingText: isHardened
-      ? "USB Auto-Installation of firmware images and configuration files is disabled."
-      : "Insecure USB auto-install parameters detected. Unauthorized physical USB insertion could compromise system integrity.",
-    actionText: "Disable USB automatic firmware and configuration installation.",
-    remediationCli: `config system auto-install\n    set auto-install-image disable\n    set auto-install-config disable\nend`,
-    diagnosticCmd: DIAGNOSTIC_COMMANDS["CIS-HIGH-01"],
-    targetConfig: "config system auto-install"
+    targetConfig: "config system global",
+    source: src
   });
 }
 
 function checkSecUrpfAntiSpoofing(text, ast) {
-  if (!/(?:^|\n)\s*config\s+/i.test(text) && !/src-check/i.test(text)) return null;
+  const present = /(?:^|\n)\s*config\s+/i.test(text) || /src-check/i.test(text);
+  const src = ast && Object.keys(ast.global || {}).length > 0 ? "conf" : "cli";
+  if (!present && !isFullBackup(text)) {
+    return makeFinding({
+      id: "SEC-HIGH-02",
+      component: "Anti-Spoofing & uRPF Enforcement",
+      status: "NOT_EVALUATED",
+      category: "Security & Hardening",
+      source: src,
+      data: {},
+      findingText: "Control not evaluated: Section 'config system settings' is missing from configuration.",
+      actionText: "",
+      remediationCli: ""
+    });
+  }
 
   let isLoose = false;
   let isStrict = false;
@@ -3289,7 +3362,7 @@ function checkSecUrpfAntiSpoofing(text, ast) {
   for (const s of scopes) {
     const settings = (s.system && s.system.settings) || s['system settings'] || {};
     const srcCheck = (settings['src-check'] || '').toLowerCase();
-    const asymCheck = (settings['asym-route'] || '').toLowerCase();
+    const asymCheck = (settings['asymroute'] || settings['asym-route'] || '').toLowerCase();
     const strictCheck = (settings['strict-src-check'] || '').toLowerCase();
     if (strictCheck === 'enable' || (srcCheck === 'enable' && asymCheck === 'disable')) isStrict = true;
     else if (strictCheck === 'disable' || srcCheck === 'enable') isLoose = true;
@@ -3314,8 +3387,8 @@ function checkSecUrpfAntiSpoofing(text, ast) {
     }
   }
 
-  let status = "FAIL";
-  let desc = "uRPF anti-spoofing is disabled across routing settings. Spoofed IP packets can bypass security policies.";
+  let status = "WARN";
+  let desc = "Feasible Path (loose) uRPF anti-spoofing active (FortiOS default: src-check enabled, asymmetric routing allowed).";
   if (disabledIntfs.length > 0) {
     status = "FAIL";
     desc = `uRPF source verification explicitly disabled on interface(s): ${disabledIntfs.join(', ')}. Inbound spoofed packets permitted.`;
@@ -3333,14 +3406,29 @@ function checkSecUrpfAntiSpoofing(text, ast) {
     status,
     findingText: desc,
     actionText: "Enforce strict reverse path filtering on perimeter interfaces to block forged source addresses.",
-    remediationCli: `config system settings\n    set strict-src-check enable\n    set asym-route disable\nend\nconfig system interface\n    edit <wan-interface>\n        set src-check enable\n    next\nend`,
+    remediationCli: `config system settings\n    set strict-src-check enable\n    set asymroute disable\nend\nconfig system interface\n    edit \n        set src-check enable\n    next\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-HIGH-02"],
-    targetConfig: "config system settings"
+    targetConfig: "config system settings",
+    source: src
   });
 }
 
 function checkCisDnsOverTls(text, ast) {
-  if (!/(?:^|\n)\s*config\s+/i.test(text) && !/system\s+dns/i.test(text)) return null;
+  const present = /(?:^|\n)\s*config\s+/i.test(text) || /system\s+dns/i.test(text);
+  const src = ast && Object.keys(ast.global || {}).length > 0 ? "conf" : "cli";
+  if (!present && !isFullBackup(text)) {
+    return makeFinding({
+      id: "CIS-MED-02",
+      component: "Encrypted DNS Resolution (DoT)",
+      status: "NOT_EVALUATED",
+      category: "CIS Benchmark",
+      source: src,
+      data: {},
+      findingText: "Control not evaluated: Section 'config system dns' is missing from configuration.",
+      actionText: "",
+      remediationCli: ""
+    });
+  }
 
   const dns = (ast && ast.global && ((ast.global.system && ast.global.system.dns) || ast.global['system dns'])) || {};
   const dot = (dns['dns-over-tls'] || dns['protocol'] || '').toLowerCase();
@@ -3359,7 +3447,8 @@ function checkCisDnsOverTls(text, ast) {
     actionText: "Enable DNS-over-TLS (DoT) upstream to protect system resolutions from MITM tampering.",
     remediationCli: `config system dns\n    set protocol dot\n    set server-hostname "cloudflare-dns.com"\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["CIS-MED-02"],
-    targetConfig: "config system dns"
+    targetConfig: "config system dns",
+    source: src
   });
 }
 
@@ -3393,43 +3482,29 @@ function checkSecAdminMfa(text, ast) {
       const twoFactor = (data['two-factor'] || data['two-factor-authentication'] || '').toLowerCase();
       const hasMfa = twoFactor && twoFactor !== 'disable';
       if (!hasMfa) {
-        let hasHardenedTrusthost = false;
-        for (const [k, v] of Object.entries(data)) {
-          if (/^trusthost\d*$/i.test(k)) {
-            if (!isUnhardenedTrusthost(v)) {
-              hasHardenedTrusthost = true;
-              break;
-            }
-          }
-        }
-        if (!hasHardenedTrusthost) {
-          unhardenedAdmins.push(adminName);
-        }
+        unhardenedAdmins.push(adminName);
       }
     }
   }
 
   if (totalAdmins === 0) {
-    const adminBlocks = text.split(/(?:^|\n)\s*edit\s+/i);
-    for (let i = 1; i < adminBlocks.length; i++) {
-      const block = adminBlocks[i];
-      if (/set\s+status\s+disable/i.test(block)) continue;
-      if (/set\s+password|set\s+accprofile/i.test(block)) {
-        totalAdmins++;
-        const m = block.match(/^["']?([a-zA-Z0-9_-]+)["']?/);
-        const name = m ? m[1] : `admin_${i}`;
-        const has2fa = /set\s+(?:two-factor|two-factor-authentication)\s+(?:enable|fortitoken|email|sms)/i.test(block);
-        const trusthostMatches = [...block.matchAll(/set\s+trusthost\d*\s+([^\r\n]+)/gi)];
-        let hasHardenedTrusthost = false;
-        for (const tm of trusthostMatches) {
-          const rawVal = tm[1].trim();
-          if (!isUnhardenedTrusthost(rawVal)) {
-            hasHardenedTrusthost = true;
-            break;
+    const adminSecMatches = text.matchAll(/(?:config\s+system\s+admin|show\s+system\s+admin)([\s\S]*?)(?:^end|\r?\n\s*end)/gi);
+    let adminIdx = 0;
+    for (const secMatch of adminSecMatches) {
+      const secContent = secMatch[1];
+      const adminBlocks = secContent.split(/(?:^|\n)\s*edit\s+/i);
+      for (let i = 1; i < adminBlocks.length; i++) {
+        adminIdx++;
+        const block = adminBlocks[i];
+        if (/set\s+status\s+disable/i.test(block)) continue;
+        if (/set\s+password|set\s+accprofile/i.test(block)) {
+          totalAdmins++;
+          const m = block.match(/^["']?([a-zA-Z0-9_-]+)["']?/);
+          const name = m ? m[1] : `admin_${adminIdx}`;
+          const has2fa = /set\s+(?:two-factor|two-factor-authentication)\s+(?:enable|fortitoken|email|sms)/i.test(block);
+          if (!has2fa) {
+            unhardenedAdmins.push(name);
           }
-        }
-        if (!has2fa && !hasHardenedTrusthost) {
-          unhardenedAdmins.push(name);
         }
       }
     }
@@ -3443,12 +3518,13 @@ function checkSecAdminMfa(text, ast) {
     component: "Administrative Multi-Factor Authentication",
     status: isPass ? "PASS" : "FAIL",
     findingText: isPass
-      ? "All administrative accounts enforce multi-factor authentication (FortiToken/Email/SMS/RADIUS MFA) or explicit trusted host restrictions."
-      : `Administrative account(s) missing mandatory MFA: ${unhardenedAdmins.slice(0, 5).join(', ')}${unhardenedAdmins.length > 5 ? ' (+' + (unhardenedAdmins.length - 5) + ')' : ''}.`,
+      ? "All active administrative accounts enforce multi-factor authentication (FortiToken/Email/SMS/RADIUS MFA)."
+      : `Active administrative account(s) missing mandatory MFA: ${unhardenedAdmins.slice(0, 5).join(', ')}${unhardenedAdmins.length > 5 ? ' (+' + (unhardenedAdmins.length - 5) + ')' : ''}.`,
     actionText: "Mandate hardware or software two-factor authentication on all administrative profiles.",
     remediationCli: `config system admin\n    edit <admin_user>\n        set two-factor fortitoken\n        set fortitoken <token_sn>\n    next\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-HIGH-01"],
-    targetConfig: "config system admin"
+    targetConfig: "config system admin",
+    source: ast && Object.keys(ast.global || {}).length > 0 ? "conf" : "cli"
   });
 }
 
@@ -3499,7 +3575,8 @@ function checkSecSslSshProfile(text, ast) {
     actionText: "Harden SSL inspection profiles to reject obsolete ciphers and require TLS 1.2 or TLS 1.3.",
     remediationCli: `config firewall ssl-ssh-profile\n    edit <profile-name>\n        set min-allowed-ssl-version tls-1.2\n        set untrusted-server-cert block\n    next\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-MED-01"],
-    targetConfig: "config firewall ssl-ssh-profile"
+    targetConfig: "config firewall ssl-ssh-profile",
+    source: ast && Object.keys(ast.global || {}).length > 0 ? "conf" : "cli"
   });
 }
 
@@ -3540,7 +3617,8 @@ function checkSecFgfmExposure(text, ast) {
     actionText: "Strip fgfm protocol from allowaccess on all public-facing WAN interfaces immediately.",
     remediationCli: `config system interface\n    edit <wan-interface>\n        set allowaccess ping https ssh\n    next\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-CRIT-01"],
-    targetConfig: "config system interface"
+    targetConfig: "config system interface",
+    source: ast && Object.keys(ast.global || {}).length > 0 ? "conf" : "cli"
   });
 }
 
@@ -3603,11 +3681,43 @@ function checkSecSslVpnWebMode(text, ast) {
     actionText: "Disable web-mode on all SSL-VPN portals and enforce strictly tunnel-mode access.",
     remediationCli: `config vpn ssl web portal\n    edit <portal-name>\n        set web-mode disable\n    next\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-CRIT-02"],
-    targetConfig: "config vpn ssl web portal"
+    targetConfig: "config vpn ssl web portal",
+    source: ast && Object.keys(ast.global || {}).length > 0 ? "conf" : "cli"
   });
 }
 
-function checkSecFortiOSLifecycle(text) {
+const FORTIOS_LIFECYCLE_TABLE = {
+  "7.0": {
+    minSafePatch: 14,
+    minSafeBuild: 564,
+    statusAtMin: "WARN",
+    cveText: "critical pre-auth RCE vulnerabilities (CVE-2024-21762 & CVE-2023-27997)",
+    note: "Branch 7.0 has reached End of Engineering Support (EOES); maintenance is limited to critical PSIRT patches."
+  },
+  "7.2": {
+    minSafePatch: 8,
+    minSafeBuild: 1637,
+    statusAtMin: "PASS",
+    cveText: "critical FGFM format string RCE (CVE-2024-23113) & authentication bypass",
+    note: "Branch 7.2 is within active engineering and security patch support."
+  },
+  "7.4": {
+    minSafePatch: 4,
+    minSafeBuild: null,
+    statusAtMin: "PASS",
+    cveText: "critical FGFM format string RCE (CVE-2024-23113) & PSIRT advisories",
+    note: "Branch 7.4 is within active mainstream engineering support."
+  },
+  "7.6": {
+    minSafePatch: 0,
+    minSafeBuild: null,
+    statusAtMin: "PASS",
+    cveText: "",
+    note: "Branch 7.6 is within active feature engineering support."
+  }
+};
+
+function checkSecFortiOSLifecycle(text, ast = null) {
   const m = /FortiOS\s+[vV]?(\d+)\.(\d+)\.(\d+)(?:[\s,]+build(\d+))?/i.exec(text) ||
             /Version:\s*FortiGate[\w-]*\s+v?(\d+)\.(\d+)\.(\d+),build(\d+)/i.exec(text) ||
             /#config-version=[A-Za-z0-9_-]*-(\d+)\.(\d+)\.(\d+)(?:-FW)?-build(\d+)/i.exec(text);
@@ -3622,21 +3732,26 @@ function checkSecFortiOSLifecycle(text) {
   let status = "PASS";
   let finding = `Firmware branch ${verStr} is within active support maintenance.`;
 
-  if (major < 7 || (major === 7 && minor === 0 && patch < 14)) {
+  if (major < 7) {
     status = "FAIL";
-    finding = `End-of-Life (EOL) FortiOS branch detected: ${verStr}. Upstream vendor security engineering has terminated active security patches for this branch.`;
-  } else if (major === 7 && minor === 0 && build && build < 564) {
-    status = "FAIL";
-    finding = `Vulnerable FortiOS 7.0 build detected (${verStr} < build 0564). Susceptible to critical pre-auth RCE vulnerabilities (CVE-2024-21762).`;
-  } else if (major === 7 && minor === 2 && build && build < 1637) {
-    status = "FAIL";
-    finding = `Vulnerable FortiOS 7.2 build detected (${verStr} < build 1637). Critical authentication bypass vulnerabilities active (CVE-2024-23113).`;
-  } else if (major === 7 && minor === 0) {
-    status = "WARN";
-    finding = `FortiOS 7.0 (${verStr}) is past End of Engineering Support (EOES). Upstream maintenance limited to critical PSIRT patches until Sept 2025.`;
-  } else if (major === 7 && minor === 2 && (patch < 8 || (build && build < 1637))) {
-    status = "FAIL";
-    finding = `Vulnerable FortiOS 7.2 release detected (${verStr} < 7.2.8). Critical FGFM format string RCE (CVE-2024-23113) unpatched.`;
+    finding = `End-of-Life (EOL) legacy FortiOS branch detected: ${verStr}. Upstream vendor security engineering has terminated active security patches for this branch.`;
+  } else {
+    const branchKey = `${major}.${minor}`;
+    const branchInfo = FORTIOS_LIFECYCLE_TABLE[branchKey];
+    if (branchInfo) {
+      const isPatchOutdated = patch < branchInfo.minSafePatch;
+      const isBuildOutdated = Boolean(build && branchInfo.minSafeBuild && build < branchInfo.minSafeBuild);
+      if (isPatchOutdated || isBuildOutdated) {
+        status = "FAIL";
+        finding = `Vulnerable FortiOS ${branchKey} release detected (${verStr} < ${branchKey}.${branchInfo.minSafePatch}). Susceptible to ${branchInfo.cveText}.`;
+      } else {
+        status = branchInfo.statusAtMin;
+        finding = `FortiOS ${verStr} is at or above baseline patch level (${branchKey}.${branchInfo.minSafePatch}). ${branchInfo.note}`;
+      }
+    } else {
+      status = "PASS";
+      finding = `Firmware release ${verStr} is running an active modern branch.`;
+    }
   }
 
   return makeFinding({
@@ -3648,7 +3763,8 @@ function checkSecFortiOSLifecycle(text) {
     actionText: "Upgrade appliance firmware to current Fortinet recommended patch branch.",
     remediationCli: "# Execute coordinated firmware image verification and install:\nexecute restore image tftp <image-file> <tftp-server>",
     diagnosticCmd: DIAGNOSTIC_COMMANDS["SEC-LIFE-01"],
-    targetConfig: "get system status"
+    targetConfig: "get system status",
+    source: (ast && Object.keys(ast.global || {}).length > 0) || /(?:^|\n)\s*config\s+/i.test(text) ? "conf" : "cli"
   });
 }
 
@@ -3726,7 +3842,7 @@ function checkOpsWadWorkers(text) {
 }
 
 function checkOpsHaHistory(text) {
-  if (!text.includes("ha history") && !text.includes("diagnose sys ha history") && !/\[(Master Change|Heartbeat Lost|Split-Brain|Link Failure)\]/i.test(text)) return null;
+  if (!text.includes("ha history") && !text.includes("diagnose sys ha history") && !/\[(Master Change|Primary Change|Heartbeat Lost|Split-Brain|Link Failure)\]/i.test(text)) return null;
 
   let masterChanges = 0;
   let splitBrain = false;
@@ -3737,7 +3853,7 @@ function checkOpsHaHistory(text) {
   for (const line of lines) {
     if (/Split-Brain/i.test(line)) splitBrain = true;
     if (/Heartbeat Lost/i.test(line)) heartbeatLost = true;
-    if (/\[Master Change\]|became\s+master|becomes\s+master/i.test(line)) masterChanges++;
+    if (/\[(?:Master|Primary) Change\]|became\s+(?:master|primary)|becomes\s+(?:master|primary)/i.test(line)) masterChanges++;
     if (/\[Link Failure\]|mondev\s+down/i.test(line)) linkFailures++;
   }
 
@@ -3746,10 +3862,10 @@ function checkOpsHaHistory(text) {
 
   if (splitBrain || heartbeatLost) {
     status = "FAIL";
-    details = `Critical HA Integrity Alert: ${splitBrain ? 'Split-Brain detected (both units operated as Master simultaneously)' : 'Heartbeat connection lost'}. Risk of MAC flapping and dual-primary traffic disruption.`;
+    details = `Critical HA Integrity Alert: ${splitBrain ? 'Split-Brain detected (both units operated as Primary/Master simultaneously)' : 'Heartbeat connection lost'}. Risk of MAC flapping and dual-primary traffic disruption.`;
   } else if (masterChanges > 3) {
     status = "FAIL";
-    details = `Severe HA Cluster Flapping: ${masterChanges} Master failover transitions logged. Monitored interface link failures: ${linkFailures}.`;
+    details = `Severe HA Cluster Flapping: ${masterChanges} Primary/Master failover transitions logged. Monitored interface link failures: ${linkFailures}.`;
   } else if (masterChanges > 0 || linkFailures > 0) {
     status = "WARN";
     details = `HA cluster experienced ${masterChanges} failover transition(s) and ${linkFailures} link failure event(s) in history log.`;
@@ -3905,7 +4021,7 @@ function checkOpsRatingServers(text) {
       });
       continue;
     }
-    const m2 = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*?RTT\s*=\\s*(\d+)/i.exec(line);
+    const m2 = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}).*?RTT\s*=\s*(\d+)/i.exec(line);
     if (m2) {
       servers.push({
         ip: m2[1],
@@ -3957,7 +4073,7 @@ function checkOpsBgpDampening(text) {
       dampenedRoutes++;
     }
     const flapMatch = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}\b.*?(\d+)\s+flaps/i.exec(line) ||
-                      /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\/\d{1,2}\b\s+\d+\s+(\d+)/i.exec(line);
+                      /(?:Flaps|Flap count)[:\s]+(\d+)/i.exec(line);
     if (flapMatch) {
       const count = parseInt(flapMatch[1], 10);
       if (count > 0) flappingPrefixes++;
@@ -4254,8 +4370,8 @@ function checkFazSilentForwarder(text) {
   let silentDevices = [];
 
   for (const line of lines) {
-    const m = /([a-zA-Z0-9_-]+)\s+.*?Rate\(1hr\)\s*=\s*0(\.0+)?/i.exec(line) ||
-              /([a-zA-Z0-9_-]+)\s+.*?current\s*=\s*0(\.0+)?/i.exec(line);
+    const m = /([a-zA-Z0-9_-]+)\s+.*?Rate\(1hr\)\s*=\s*0(?:\.0+)?(?![\d.])/i.exec(line) ||
+              /([a-zA-Z0-9_-]+)\s+.*?current\s*=\s*0(?:\.0+)?(?![\d.])/i.exec(line);
     if (m && !m[1].toLowerCase().includes("total") && !m[1].toLowerCase().includes("device")) {
       silentDevices.push(m[1]);
     }
@@ -4285,13 +4401,13 @@ function checkFazRaidHealth(text) {
 
   const lines = text.split(/\r?\n/);
   for (const line of lines) {
-    if (/\b(?:Degraded|Failed|Unavailable)\b/i.test(line)) {
+    if (/\b(?:RAID|Array|State|Status)\b.*?\b(?:Degraded|Failed|Unavailable)\b/i.test(line) || /^\s*Status\s*:\s*(?:Degraded|Failed|Unavailable)\b/i.test(line)) {
       isDegraded = true;
     }
     if (/\b(?:Rebuilding|Synchronizing)\b/i.test(line)) {
       isRebuilding = true;
     }
-    const driveMatch = /(?:Disk|Drive)\s*#?(\d+).*?\b(Failed|Unavailable|Spare)\b/i.exec(line);
+    const driveMatch = /(?:Disk|Drive)\s*#?(\d+).*?\b(Failed|Unavailable|Offline|Error)\b/i.exec(line);
     if (driveMatch) {
       failedDrives.push(`Drive ${driveMatch[1]} (${driveMatch[2]})`);
     }
@@ -4483,7 +4599,7 @@ class FortiOSConfigTokenizer {
       "system global", "system ntp", "system dns", "system password-policy",
       "system snmp community", "system snmp user", "system snmp sysinfo",
       "log fortianalyzer setting", "log syslogd setting", "system admin",
-      "user saml", "system saml", "system external-resource"
+      "user saml", "system saml", "system external-resource", "system interface"
     ]);
 
     if (SYSTEM_GLOBAL_SECTIONS.has(lowerName)) {
@@ -4584,6 +4700,36 @@ class FortiOSConfigTokenizer {
 
 function getKnownWanInterfaces(tokenizer, text) {
   const wanSet = new Set();
+  const excludedSet = new Set();
+
+  function evaluateInterface(name, role, alias) {
+    const lowerName = (name || "").toLowerCase().trim();
+    const lowerRole = (role || "").toLowerCase().trim();
+    const lowerAlias = (alias || "").toLowerCase().trim();
+
+    if (!lowerName) return;
+
+    const isExplicitNonWan =
+      lowerRole === "lan" ||
+      lowerRole === "dmz" ||
+      /\b(lan|internal|mgmt|management|inside|trust|dmz)\b/i.test(lowerAlias) ||
+      /\b(lan|internal|mgmt|management|inside|trust|dmz)\b/i.test(lowerName);
+
+    if (isExplicitNonWan) {
+      excludedSet.add(lowerName);
+      wanSet.delete(lowerName);
+      return;
+    }
+
+    if (
+      lowerRole === "wan" ||
+      /\b(wan|isp|internet|external|outside|public)\b/i.test(lowerAlias) ||
+      /\b(wan|isp|internet|external|outside|public)\b/i.test(lowerName) ||
+      lowerName.startsWith("wan")
+    ) {
+      wanSet.add(lowerName);
+    }
+  }
 
   if (tokenizer) {
     const intfEntries = tokenizer.getEntries("system interface");
@@ -4591,20 +4737,8 @@ function getKnownWanInterfaces(tokenizer, text) {
       const origName = entry.name || entry._origKey || key;
       const role = (entry.properties["role"] || "").toLowerCase();
       const alias = (entry.properties["alias"] || "").toLowerCase();
-      const lowerKey = key.toLowerCase();
-      const lowerName = origName.toLowerCase();
-
-      if (
-        role === "wan" ||
-        /\b(wan|isp|internet|external|outside)\b/i.test(alias) ||
-        /\b(wan|isp|internet|external|outside)\b/i.test(lowerKey) ||
-        /\b(wan|isp|internet|external|outside)\b/i.test(lowerName) ||
-        lowerName.startsWith("wan") ||
-        lowerKey.startsWith("wan")
-      ) {
-        wanSet.add(lowerName);
-        wanSet.add(lowerKey);
-      }
+      evaluateInterface(origName, role, alias);
+      evaluateInterface(key, role, alias);
     }
   }
 
@@ -4620,17 +4754,16 @@ function getKnownWanInterfaces(tokenizer, text) {
         const aliasM = /set\s+alias\s+(?:"([^"]+)"|(\S+))/i.exec(body);
         const role = roleM ? roleM[1].toLowerCase() : "";
         const alias = aliasM ? (aliasM[1] || aliasM[2]).toLowerCase() : "";
-
-        if (
-          role === "wan" ||
-          /\b(wan|isp|internet|external|outside)\b/i.test(alias) ||
-          /\b(wan|isp|internet|external|outside)\b/i.test(name) ||
-          name.startsWith("wan")
-        ) {
-          wanSet.add(name);
-        }
+        evaluateInterface(name, role, alias);
       }
     }
+  }
+
+  if (!excludedSet.has("port1")) {
+    wanSet.add("port1");
+  }
+  if (!excludedSet.has("port2")) {
+    wanSet.add("port2");
   }
 
   return wanSet;
@@ -4641,7 +4774,7 @@ function isWanInterface(intfName, wanSet) {
   if (wanSet && wanSet.has(lower)) return true;
   return (
     lower.startsWith("wan") ||
-    /\b(wan|isp|internet|external|outside)\b/i.test(lower) ||
+    /\b(wan|isp|internet|external|outside|public)\b/i.test(lower) ||
     lower === "any"
   );
 }
@@ -4842,6 +4975,14 @@ function getFirewallPolicyList(tokenizer, text) {
       for (const [id, entry] of Object.entries(entries)) {
         const status = cleanVal(entry.properties["status"] || "enable").toLowerCase();
         const schedule = cleanVal(entry.properties["schedule"] || "always");
+        const utmStatus = cleanVal(entry.properties["utm-status"] || "").toLowerCase();
+        const sslProfile = cleanVal(entry.properties["ssl-ssh-profile"] || "");
+        const avProfile = cleanVal(entry.properties["av-profile"] || "");
+        const ipsSensor = cleanVal(entry.properties["ips-sensor"] || "");
+        const webfilterProfile = cleanVal(entry.properties["webfilter-profile"] || "");
+        const applicationList = cleanVal(entry.properties["application-list"] || "");
+        const profileGroup = cleanVal(entry.properties["profile-group"] || "");
+        const hasUtm = utmStatus === "enable" || Boolean(avProfile || ipsSensor || webfilterProfile || applicationList || profileGroup);
         policyList.push({
           id,
           vdom,
@@ -4856,9 +4997,14 @@ function getFirewallPolicyList(tokenizer, text) {
           dstaddr: extractQuotedTokens(entry.properties["dstaddr"] || ""),
           service: extractQuotedTokens(entry.properties["service"] || ""),
           groups: extractQuotedTokens(entry.properties["groups"] || ""),
-          utmStatus: cleanVal(entry.properties["utm-status"] || "").toLowerCase(),
-          sslProfile: cleanVal(entry.properties["ssl-ssh-profile"] || ""),
-          avProfile: cleanVal(entry.properties["av-profile"] || ""),
+          utmStatus,
+          sslProfile,
+          avProfile,
+          ipsSensor,
+          webfilterProfile,
+          applicationList,
+          profileGroup,
+          hasUtm,
           rawProps: entry.properties,
         });
       }
@@ -4884,6 +5030,20 @@ function getFirewallPolicyList(tokenizer, text) {
       const srvM = /set\s+service\s+([^\n]+)/i.exec(b);
       const grpM = /set\s+groups\s+([^\n]+)/i.exec(b);
       const utmM = /set\s+utm-status\s+(\S+)/i.exec(b);
+      const avM = /set\s+av-profile\s+([^\n]+)/i.exec(b);
+      const ipsM = /set\s+ips-sensor\s+([^\n]+)/i.exec(b);
+      const wfM = /set\s+webfilter-profile\s+([^\n]+)/i.exec(b);
+      const appM = /set\s+application-list\s+([^\n]+)/i.exec(b);
+      const pgM = /set\s+profile-group\s+([^\n]+)/i.exec(b);
+      const sslM = /set\s+ssl-ssh-profile\s+([^\n]+)/i.exec(b);
+      const utmStatus = utmM ? utmM[1].toLowerCase() : "";
+      const avProfile = avM ? cleanVal(avM[1]) : "";
+      const ipsSensor = ipsM ? cleanVal(ipsM[1]) : "";
+      const webfilterProfile = wfM ? cleanVal(wfM[1]) : "";
+      const applicationList = appM ? cleanVal(appM[1]) : "";
+      const profileGroup = pgM ? cleanVal(pgM[1]) : "";
+      const sslProfile = sslM ? cleanVal(sslM[1]) : "";
+      const hasUtm = utmStatus === "enable" || Boolean(avProfile || ipsSensor || webfilterProfile || applicationList || profileGroup);
 
       policyList.push({
         id: m[1],
@@ -4899,7 +5059,14 @@ function getFirewallPolicyList(tokenizer, text) {
         dstaddr: dstM ? extractQuotedTokens(dstM[1]) : [],
         service: srvM ? extractQuotedTokens(srvM[1]) : [],
         groups: grpM ? extractQuotedTokens(grpM[1]) : [],
-        utmStatus: utmM ? utmM[1].toLowerCase() : "",
+        utmStatus,
+        sslProfile,
+        avProfile,
+        ipsSensor,
+        webfilterProfile,
+        applicationList,
+        profileGroup,
+        hasUtm,
       });
     }
   }
@@ -7591,16 +7758,16 @@ function checkSecFirewallAnyPolicy(tokenizer, text = "") {
 
   for (const pol of policyList) {
     if (pol.status === "disable") continue;
-    const isAccept = !pol.action || pol.action === "accept";
-    if (isAccept) {
-      const isSrcAll = pol.srcaddr.some((a) => a.toLowerCase() === "all" || a === "0.0.0.0/0");
-      const isDstAll = pol.dstaddr.some((a) => a.toLowerCase() === "all" || a === "0.0.0.0/0");
-      const isSrvAll = pol.service.some((s) => s.toLowerCase() === "all") || !pol.service.length;
-      const hasUtm = pol.utmStatus === "enable";
+    if (pol.schedInfo && !pol.schedInfo.isActive) continue; // Respect schedules
+    if (pol.action !== "accept") continue; // STRICTLY filter for 'accept'
 
-      if (isSrcAll && isDstAll && isSrvAll && !hasUtm) {
-        offending.push(pol);
-      }
+    const isSrcAll = pol.srcaddr.some((a) => a.toLowerCase() === "all" || a === "0.0.0.0/0");
+    const isDstAll = pol.dstaddr.some((a) => a.toLowerCase() === "all" || a === "0.0.0.0/0");
+    const isSrvAll = pol.service.some((s) => s.toLowerCase() === "all") || !pol.service.length;
+    const hasUtm = pol.hasUtm || pol.utmStatus === "enable" || Boolean(pol.avProfile || pol.ipsSensor || pol.webfilterProfile || pol.applicationList || pol.profileGroup);
+
+    if (isSrcAll && isDstAll && isSrvAll && !hasUtm) {
+      offending.push(pol);
     }
   }
 
@@ -7719,7 +7886,8 @@ function checkSecInboundDangerousPorts(tokenizer, text = "") {
 
   for (const p of policyList) {
     if (p.status === "disable") continue;
-    if (p.action && p.action !== "accept") continue;
+    if (p.schedInfo && !p.schedInfo.isActive) continue; // Respect schedules
+    if (p.action !== "accept") continue; // STRICTLY filter for 'accept'
 
     const wanIngress = p.srcintf.filter((intf) => isWanInterface(intf, wanSet));
     if (!wanIngress.length) continue;
@@ -8123,12 +8291,17 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
     });
   }
 
-  const isStrongCryptoCompliant = !!strongCrypto && strongCrypto.toLowerCase() === "enable";
-  const isStrongCryptoDisabled = !isStrongCryptoCompliant;
-
   const fullText = (tokenizer && tokenizer.rawText) ? tokenizer.rawText : text;
   const isExplicitLegacyOs = /(?:#config-version=[^:\r\n]*?[-_ ]|\b(?:Version|Firmware):\s*.*?\bv?|\bv)([56]\.[0-9]+)\b/i.test(fullText);
   const isFortiOS7 = !isExplicitLegacyOs;
+
+  let effectiveStrongCrypto = strongCrypto;
+  if (!effectiveStrongCrypto && isFortiOS7) {
+    effectiveStrongCrypto = "enable";
+  }
+
+  const isStrongCryptoCompliant = !!effectiveStrongCrypto && effectiveStrongCrypto.toLowerCase() === "enable";
+  const isStrongCryptoDisabled = !isStrongCryptoCompliant;
 
   const isSslMinVerUnset = !sslMinVer;
   let effectiveTlsVer = sslMinVer;
@@ -8139,7 +8312,9 @@ function checkCisTlsStrongCrypto(tokenizer, text = "") {
   const normTls = (effectiveTlsVer || "").toUpperCase().replace(/[._]/g, "-");
   const isLegacyTls = !effectiveTlsVer || /^(SSL3|SSLV3|TLS1-0|TLS1-1|TLSV1|TLSV1-0|TLSV1-1)$/i.test(normTls);
 
-  const strongCryptoDisplay = strongCrypto ? strongCrypto.toLowerCase() : "disable/unset";
+  const strongCryptoDisplay = strongCrypto
+    ? strongCrypto.toLowerCase()
+    : (isFortiOS7 ? "unset (FortiOS 7.x default: enable)" : "disable/unset");
   const tlsVerDisplay = sslMinVer
     ? sslMinVer
     : (isFortiOS7 ? "unset (FortiOS 7.x default: TLSv1-2)" : "unset (default: TLS 1.1)");
@@ -8422,8 +8597,72 @@ function deduplicateFindings(rawFindings) {
 }
 
 // =====================================================================
+// =====================================================================
 // Orchestration & Unified Engine Runner
 // =====================================================================
+const ALL_CHECKS = [
+  // Core Operational Health Checks
+  { id: "FGT-SYS-01", run: (text) => checkFgtSystemUptime(text) },
+  { id: "FGT-PERF-01", run: (text) => checkFgtPerformance(text) },
+  { id: "FGT-MEM-02", run: (text) => checkFgtMemoryConserve(text) },
+  { id: "FGT-SESS-01", run: (text) => checkFgtSessionStat(text) },
+  { id: "FGT-RT-BGP-01", run: (text) => checkFgtBgpSummary(text) },
+  { id: "FGT-RT-OSPF-01", run: (text) => checkFgtOspfNeighbors(text) },
+  { id: "FGT-HA-01", run: (text) => checkFgtHaStatus(text) },
+  { id: "FGT-FG-01", run: (text) => checkFgtFortiGuardSync(text) },
+  { id: "FGT-IPSEC-01", run: (text) => checkFgtIpsecTunnels(text) },
+  { id: "FGT-SDWAN-01", run: (text) => checkFgtSdwanSla(text) },
+  { id: "FGT-FEED-01", run: (text, tok) => checkFgtThreatFeeds(text, tok) },
+  { id: "FGT-NET-01", run: (text) => checkFgtPhysicalInterfaces(text) },
+  { id: "FGT-NET-02", run: (text) => checkFgtNetlinkErrorRatios(text) },
+  { id: "FGT-CERT-01", run: (text) => checkFgtCertificates(text) },
+  { id: "SEC-INTF-01", run: (text, tok) => checkSecWanAdminAccess(text, tok) },
+  { id: "SEC-USER-01", run: (text, tok) => checkSecLocalUsersMfa(text, tok) },
+  { id: "FGT-BAN-01", run: (text) => checkFgtBanList(text) },
+  { id: "FGT-LOG-01", run: (text) => checkFgtMiglogd(text) },
+  { id: "FGT-SYS-03", run: (text) => checkFgtCrashlogHistory(text) },
+  { id: "FAZ-STOR-01", run: (text) => checkFazStorage(text) },
+  { id: "FAZ-CONN-01", run: (text) => checkFazActiveDevices(text) },
+  { id: "FAZ-SYS-01", run: (text) => checkFazSysPerformanceHa(text) },
+  { id: "FAZ-IDX-01", run: (text) => checkFazIndexingPipeline(text) },
+  { id: "SEC-VIP-01", run: (text, tok) => checkSecVirtualIps(tok, text) },
+  { id: "SEC-VPN-01", run: (text, tok) => checkSecSslVpnGeoFencing(tok, text) },
+  // CIS Benchmark & Hardening Audits (v3.0)
+  { id: "CIS-ADM-01", run: (text, tok) => checkCisAdmIdleTimeout(tok, text) },
+  { id: "CIS-ADM-02", run: (text, tok) => checkCisAdmAccountLockout(tok, text) },
+  { id: "CIS-ADM-03", run: (text, tok) => checkCisAdmAdminPorts(tok, text) },
+  { id: "CIS-SYS-01", run: (text, tok) => checkCisSysHostname(tok, text) },
+  { id: "CIS-SYS-02", run: (text, tok) => checkCisSysNtpTimezone(tok, text) },
+  { id: "CIS-AUTH-01", run: (text, tok) => checkCisAuthPasswordPolicy(tok, text) },
+  { id: "CIS-MGMT-01", run: (text, tok) => checkCisMgmtSnmpCommunity(tok, text) },
+  { id: "SEC-FW-01", run: (text, tok) => checkSecFirewallAnyPolicy(tok, text) },
+  { id: "SEC-FW-02", run: (text, tok) => checkSecInboundDangerousPorts(tok, text) },
+  { id: "CIS-LOG-01", run: (text, tok) => checkCisLogCentralized(tok, text) },
+  { id: "CIS-AUTH-02", run: (text, tok) => checkCisAuthTrustedHosts(tok, text) },
+  { id: "CIS-TLS-01", run: (text, tok) => checkCisTlsStrongCrypto(tok, text) },
+  { id: "CIS-CERT-01", run: (text, tok) => checkCisCertFactoryDefault(tok, text) },
+  // Deep Research Checks: Static Configuration Hardening
+  { id: "CIS-MED-01", run: (text, tok, ast) => checkCisBanners(text, ast) },
+  { id: "CIS-HIGH-01", run: (text, tok, ast) => checkCisAutoInstall(text, ast) },
+  { id: "SEC-HIGH-02", run: (text, tok, ast) => checkSecUrpfAntiSpoofing(text, ast) },
+  { id: "CIS-MED-02", run: (text, tok, ast) => checkCisDnsOverTls(text, ast) },
+  { id: "SEC-HIGH-01", run: (text, tok, ast) => checkSecAdminMfa(text, ast) },
+  { id: "SEC-MED-01", run: (text, tok, ast) => checkSecSslSshProfile(text, ast) },
+  { id: "SEC-CRIT-01", run: (text, tok, ast) => checkSecFgfmExposure(text, ast) },
+  { id: "SEC-CRIT-02", run: (text, tok, ast) => checkSecSslVpnWebMode(text, ast) },
+  { id: "SEC-LIFE-01", run: (text, tok, ast) => checkSecFortiOSLifecycle(text, ast) },
+  // Deep Research Checks: Operational Runtime Diagnostics
+  { id: "OPS-MEM-01", run: (text) => checkOpsWadWorkers(text) },
+  { id: "OPS-HA-01", run: (text) => checkOpsHaHistory(text) },
+  { id: "OPS-DNS-01", run: (text) => checkOpsRatingServers(text) },
+  { id: "OPS-BGP-01", run: (text) => checkOpsBgpDampening(text) },
+  { id: "FAZ-FWD-01", run: (text) => checkFazSilentForwarder(text) },
+  { id: "FAZ-DISK-01", run: (text) => checkFazRaidHealth(text) },
+  { id: "OPS-HA-02", run: (text) => checkOpsHaClusterChecksum(text) },
+  { id: "OPS-SYS-04", run: (text) => checkOpsProcessCpu(text) },
+  { id: "SEC-SESS-01", run: (text) => checkSecAuthSessions(text) },
+];
+
 function runAnalysisForDevice(deviceText, deviceId = "default") {
   const normalizedDev = normalizeApplianceName(deviceId, "Primary-FW");
   const rawFindings = [];
@@ -8441,74 +8680,17 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
     }
   }
 
-  const allChecks = [
-    // Core Operational Health Checks
-    { id: "FGT-SYS-01", fn: () => checkFgtSystemUptime(deviceText) },
-    { id: "FGT-PERF-01", fn: () => checkFgtPerformance(deviceText) },
-    { id: "FGT-MEM-02", fn: () => checkFgtMemoryConserve(deviceText) },
-    { id: "FGT-SESS-01", fn: () => checkFgtSessionStat(deviceText) },
-    { id: "FGT-RT-BGP-01", fn: () => checkFgtBgpSummary(deviceText) },
-    { id: "FGT-RT-OSPF-01", fn: () => checkFgtOspfNeighbors(deviceText) },
-    { id: "FGT-HA-01", fn: () => checkFgtHaStatus(deviceText) },
-    { id: "FGT-FG-01", fn: () => checkFgtFortiGuardSync(deviceText) },
-    { id: "FGT-IPSEC-01", fn: () => checkFgtIpsecTunnels(deviceText) },
-    { id: "FGT-SDWAN-01", fn: () => checkFgtSdwanSla(deviceText) },
-    { id: "FGT-FEED-01", fn: () => checkFgtThreatFeeds(deviceText, tokenizer) },
-    { id: "FGT-NET-01", fn: () => checkFgtPhysicalInterfaces(deviceText) },
-    { id: "FGT-NET-02", fn: () => checkFgtNetlinkErrorRatios(deviceText) },
-    { id: "FGT-CERT-01", fn: () => checkFgtCertificates(deviceText) },
-    { id: "SEC-INTF-01", fn: () => checkSecWanAdminAccess(deviceText, tokenizer) },
-    { id: "SEC-USER-01", fn: () => checkSecLocalUsersMfa(deviceText, tokenizer) },
-    { id: "FGT-BAN-01", fn: () => checkFgtBanList(deviceText) },
-    { id: "FGT-LOG-01", fn: () => checkFgtMiglogd(deviceText) },
-    { id: "FGT-SYS-03", fn: () => checkFgtCrashlogHistory(deviceText) },
-    { id: "FAZ-STOR-01", fn: () => checkFazStorage(deviceText) },
-    { id: "FAZ-CONN-01", fn: () => checkFazActiveDevices(deviceText) },
-    { id: "FAZ-SYS-01", fn: () => checkFazSysPerformanceHa(deviceText) },
-    { id: "FAZ-IDX-01", fn: () => checkFazIndexingPipeline(deviceText) },
-    { id: "SEC-VIP-01", fn: () => checkSecVirtualIps(tokenizer, deviceText) },
-    { id: "SEC-VPN-01", fn: () => checkSecSslVpnGeoFencing(tokenizer, deviceText) },
-    // CIS Benchmark & Hardening Audits (v3.0)
-    { id: "CIS-ADM-01", fn: () => checkCisAdmIdleTimeout(tokenizer, deviceText) },
-    { id: "CIS-ADM-02", fn: () => checkCisAdmAccountLockout(tokenizer, deviceText) },
-    { id: "CIS-ADM-03", fn: () => checkCisAdmAdminPorts(tokenizer, deviceText) },
-    { id: "CIS-SYS-01", fn: () => checkCisSysHostname(tokenizer, deviceText) },
-    { id: "CIS-SYS-02", fn: () => checkCisSysNtpTimezone(tokenizer, deviceText) },
-    { id: "CIS-AUTH-01", fn: () => checkCisAuthPasswordPolicy(tokenizer, deviceText) },
-    { id: "CIS-MGMT-01", fn: () => checkCisMgmtSnmpCommunity(tokenizer, deviceText) },
-    { id: "SEC-FW-01", fn: () => checkSecFirewallAnyPolicy(tokenizer, deviceText) },
-    { id: "SEC-FW-02", fn: () => checkSecInboundDangerousPorts(tokenizer, deviceText) },
-    { id: "CIS-LOG-01", fn: () => checkCisLogCentralized(tokenizer, deviceText) },
-    { id: "CIS-AUTH-02", fn: () => checkCisAuthTrustedHosts(tokenizer, deviceText) },
-    { id: "CIS-TLS-01", fn: () => checkCisTlsStrongCrypto(tokenizer, deviceText) },
-    { id: "CIS-CERT-01", fn: () => checkCisCertFactoryDefault(tokenizer, deviceText) },
-    // Deep Research Checks: Static Configuration Hardening
-    { id: "CIS-MED-01", fn: () => checkCisBanners(deviceText, ast) },
-    { id: "CIS-HIGH-01", fn: () => checkCisAutoInstall(deviceText, ast) },
-    { id: "SEC-HIGH-02", fn: () => checkSecUrpfAntiSpoofing(deviceText, ast) },
-    { id: "CIS-MED-02", fn: () => checkCisDnsOverTls(deviceText, ast) },
-    { id: "SEC-HIGH-01", fn: () => checkSecAdminMfa(deviceText, ast) },
-    { id: "SEC-MED-01", fn: () => checkSecSslSshProfile(deviceText, ast) },
-    { id: "SEC-CRIT-01", fn: () => checkSecFgfmExposure(deviceText, ast) },
-    { id: "SEC-CRIT-02", fn: () => checkSecSslVpnWebMode(deviceText, ast) },
-    { id: "SEC-LIFE-01", fn: () => checkSecFortiOSLifecycle(deviceText) },
-    // Deep Research Checks: Operational Runtime Diagnostics
-    { id: "OPS-MEM-01", fn: () => checkOpsWadWorkers(deviceText) },
-    { id: "OPS-HA-01", fn: () => checkOpsHaHistory(deviceText) },
-    { id: "OPS-DNS-01", fn: () => checkOpsRatingServers(deviceText) },
-    { id: "OPS-BGP-01", fn: () => checkOpsBgpDampening(deviceText) },
-    { id: "FAZ-FWD-01", fn: () => checkFazSilentForwarder(deviceText) },
-    { id: "FAZ-DISK-01", fn: () => checkFazRaidHealth(deviceText) },
-    { id: "OPS-HA-02", fn: () => checkOpsHaClusterChecksum(deviceText) },
-    { id: "OPS-SYS-04", fn: () => checkOpsProcessCpu(deviceText) },
-    { id: "SEC-SESS-01", fn: () => checkSecAuthSessions(deviceText) },
-  ];
+  const checksToRun = (typeof window !== "undefined" && Array.isArray(window.allChecks))
+    ? window.allChecks
+    : ALL_CHECKS;
 
   let hasOperationalCliFinding = false;
 
-  for (const check of allChecks) {
+  for (const check of checksToRun) {
     try {
-      const res = check.fn();
+      const res = typeof check.run === "function"
+        ? check.run(deviceText, tokenizer, ast)
+        : (typeof check.fn === "function" ? check.fn() : null);
       if (res) {
         if (Array.isArray(res)) {
           for (const item of res) {
@@ -8516,7 +8698,7 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
             item.deviceName = item.deviceId;
             item.appliance = item.deviceId;
             rawFindings.push(item);
-            if (item.source === "cli") {
+            if (item.source === "cli" && !item.id.startsWith("RUNTIME-")) {
               hasOperationalCliFinding = true;
             }
           }
@@ -8525,7 +8707,7 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
           res.deviceName = res.deviceId;
           res.appliance = res.deviceId;
           rawFindings.push(res);
-          if (res.source === "cli") {
+          if (res.source === "cli" && !res.id.startsWith("RUNTIME-")) {
             hasOperationalCliFinding = true;
           }
         }
@@ -8561,7 +8743,19 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
 function runAnalysis(rawText, fileChunks = []) {
   let allRawFindings = [];
 
-  if (fileChunks && fileChunks.length > 1) {
+  const aggregatedChunksText = (fileChunks && fileChunks.length > 0)
+    ? fileChunks.map((c) => c.content).join("\n\n").trim()
+    : "";
+
+  // If user edited the textarea, prioritize rawText over stale fileChunks
+  const isTextareaEdited = Boolean(
+    rawText &&
+    fileChunks &&
+    fileChunks.length > 1 &&
+    rawText.trim() !== aggregatedChunksText
+  );
+
+  if (fileChunks && fileChunks.length > 1 && !isTextareaEdited) {
     for (const chunk of fileChunks) {
       const devId = extractDeviceIdentity(chunk.content, chunk.name || "device");
       const findings = runAnalysisForDevice(chunk.content, devId);
@@ -8578,7 +8772,12 @@ function runAnalysis(rawText, fileChunks = []) {
         allRawFindings.push(...findings);
       });
     } else {
-      const devId = extractDeviceIdentity(rawText, (fileChunks && fileChunks[0] && fileChunks[0].name) ? fileChunks[0].name : "Primary-FW");
+      const devId = extractDeviceIdentity(
+        rawText,
+        (!isTextareaEdited && fileChunks && fileChunks[0] && fileChunks[0].name)
+          ? fileChunks[0].name
+          : "Primary-FW"
+      );
       allRawFindings = runAnalysisForDevice(rawText, devId);
     }
   }
@@ -8840,7 +9039,7 @@ function generateRichTextHtml(findings, kind, options = {}) {
   const issuesOnly = options.issuesOnly || false;
 
   let activeFindings = issuesOnly
-    ? findings.filter((f) => f.status === "FAIL" || f.status === "WARN")
+    ? findings.filter((f) => f.status === "FAIL" || f.status === "WARN" || f.status === "ERROR")
     : findings;
 
   const passCount = activeFindings.filter((f) => f.status === "PASS").length;
@@ -8861,12 +9060,13 @@ function generateRichTextHtml(findings, kind, options = {}) {
   const warns = activeFindings.filter((f) => f.status === "WARN");
   const passes = activeFindings.filter((f) => f.status === "PASS");
   const infos = activeFindings.filter((f) => f.status === "INFO");
+  const notEvaluated = activeFindings.filter((f) => f.status === "NOT_EVALUATED" || f.status === "ERROR");
 
   const dirAttr = 'dir="ltr"';
   const textAlign = "text-align: left;";
   const actionBorder = "border-left: 3px solid #10b981; border-right: none; border-radius: 0 4px 4px 0;";
 
-  const hasCisScore = options.profile === "cis" && typeof options.cisScore === "number";
+  const hasCisScore = typeof options.cisScore === "number";
   const scoreColor = hasCisScore
     ? (options.cisScore >= 85 ? "#059669" : options.cisScore >= 70 ? "#d97706" : "#dc2626")
     : "#475569";
@@ -9061,9 +9261,44 @@ function generateRichTextHtml(findings, kind, options = {}) {
     html += `  </ul>\n`;
   }
 
+  if (notEvaluated.length > 0) {
+    html += `
+  <h3 style="margin: 16px 0 8px 0; font-size: 13.5px; font-weight: 700; color: #475569; border-bottom: 1px solid #cbd5e1; padding-bottom: 4px;">
+    Not Evaluated Controls & Engine Errors (${notEvaluated.length})
+  </h3>
+  <ul style="margin: 0 0 14px 0; padding-left: 20px;">
+`;
+    for (const f of notEvaluated) {
+      const isErr = f.status === "ERROR";
+      const statusLabel = isErr ? "ERROR" : "NOT EVALUATED";
+      const badgeBg = isErr ? "#fee2e2" : "#f1f5f9";
+      const badgeColor = isErr ? "#991b1b" : "#475569";
+      const targetConfig = getFindingTargetConfig(f);
+      const diagCmd = f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status";
+      const devBadge = escapeHtml(f.deviceId || f.deviceName || "Primary-FW");
+      html += `
+    <li style="margin-bottom: 10px;">
+      <div style="margin-bottom: 4px;">
+        <span style="background: ${badgeBg}; color: ${badgeColor}; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700;">${statusLabel}</span>
+        <span style="background: #e0f2fe; color: #0369a1; padding: 2px 7px; border-radius: 4px; font-family: monospace; font-size: 10.5px; font-weight: 700; margin-left: 4px;">${devBadge}</span>
+        <strong style="margin-left: 6px; color: #0f172a; font-size: 13px;">[${escapeHtml(f.id)}] ${escapeHtml(f.component)}</strong>
+      </div>
+      <div style="font-size: 11px; color: #64748b; font-family: monospace; margin: 2px 0 4px 0;"><strong>Diagnostic CLI:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0284c7; margin-right: 8px;">${escapeHtml(diagCmd)}</code> <strong>Target Config:</strong> <code style="background: #f1f5f9; padding: 1px 5px; border-radius: 3px; color: #0f172a;">${escapeHtml(targetConfig)}</code></div>
+      <div style="color: #334155; line-height: 1.6; font-size: 12.5px;">${formatFindingHtml(f.findingText)}</div>
+      ${
+        f.actionText
+          ? `<div style="margin-top: 3px; font-size: 12px; color: #475569;">${escapeHtml(f.actionText)}</div>`
+          : ""
+      }
+    </li>
+`;
+    }
+    html += `  </ul>\n`;
+  }
+
   html += `
   <div style="margin-top: 18px; padding-top: 8px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #94a3b8;">
-    Report generated by SecOps Security Engine v3.2
+    Report generated by SecOps Security Engine v3.5.0
   </div>
 </div>
 `;
@@ -9080,7 +9315,7 @@ function generateCleanPlainText(findings, kind, options = {}) {
   const issuesOnly = options.issuesOnly || false;
 
   const activeFindings = issuesOnly
-    ? findings.filter((f) => f.status === "FAIL" || f.status === "WARN")
+    ? findings.filter((f) => f.status === "FAIL" || f.status === "WARN" || f.status === "ERROR")
     : findings;
   const dateStr = new Date().toISOString().replace("T", " ").substring(0, 19) + " UTC";
   const passCount = activeFindings.filter((f) => f.status === "PASS").length;
@@ -9112,7 +9347,7 @@ function generateCleanPlainText(findings, kind, options = {}) {
     summaryLine,
   ];
 
-  if (options.profile === "cis" && typeof options.cisScore === "number") {
+  if (typeof options.cisScore === "number") {
     lines.push(
       `CIS Score:    ${options.cisScore}% (${options.totalPassed || 0}/${options.totalEvaluated || 0} controls passed)`
     );
@@ -9220,6 +9455,29 @@ function generateCleanPlainText(findings, kind, options = {}) {
     }
   }
 
+  const notEvaluated = activeFindings.filter((f) => f.status === "NOT_EVALUATED" || f.status === "ERROR");
+  if (notEvaluated.length > 0) {
+    lines.push(`[-] NOT EVALUATED CONTROLS & ENGINE ERRORS (${notEvaluated.length}):`);
+    lines.push("======================================================================");
+    for (const f of notEvaluated) {
+      const statusTag = f.status === "ERROR" ? "[ERROR]" : "[NOT EVALUATED]";
+      const dev = f.deviceId || f.deviceName || "Primary-FW";
+      lines.push(`* ${statusTag} [${dev}] [${f.id}] ${f.component}`);
+      lines.push(`  Diagnostic CLI: ${f.diagnosticCmd || DIAGNOSTIC_COMMANDS[f.id] || "diagnose sys status"}`);
+      lines.push(`  Target Config:  ${getFindingTargetConfig(f)}`);
+      if (!f.findingText.includes("\n")) {
+        lines.push(`  Finding: ${f.findingText}`);
+      } else {
+        lines.push(`  Finding:`);
+        f.findingText.split("\n").forEach((l) => lines.push(`    ${l}`));
+      }
+      if (f.actionText) {
+        lines.push(`  Action: ${f.actionText}`);
+      }
+      lines.push("");
+    }
+  }
+
   lines.push("======================================================================");
   lines.push("Report generated by SecOps Health Check & Config Analyzer");
   lines.push("======================================================================");
@@ -9239,7 +9497,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
   const dateStr = new Date().toISOString().replace("T", " ").substring(0, 19) + " UTC";
 
   const activeFindings = issuesOnly
-    ? findings.filter((f) => f.status === "FAIL" || f.status === "WARN")
+    ? findings.filter((f) => f.status === "FAIL" || f.status === "WARN" || f.status === "ERROR")
     : findings;
 
   const passCount = activeFindings.filter((f) => f.status === "PASS").length;
@@ -9262,7 +9520,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
   };
     const scopeMap = scopeMapEn;
 
-  const hasCisScore = options.profile === "cis" && typeof options.cisScore === "number";
+  const hasCisScore = typeof options.cisScore === "number";
   const cisScore = hasCisScore ? options.cisScore : 0;
   const scoreClass = cisScore >= 85 ? "score-high" : cisScore >= 70 ? "score-medium" : "score-low";
 
@@ -9287,6 +9545,14 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
       badgeClass = "badge-info";
       statusLabel = "INFO";
       cardStatusClass = "card-status-info";
+    } else if (status === "NOT_EVALUATED" || status === "NOT EVALUATED") {
+      badgeClass = "badge-neutral";
+      statusLabel = "NOT EVALUATED";
+      cardStatusClass = "card-status-noteval";
+    } else if (status === "ERROR") {
+      badgeClass = "badge-critical";
+      statusLabel = "ERROR";
+      cardStatusClass = "card-status-fail";
     }
 
     const targetConfig = getFindingTargetConfig(f);
@@ -9377,6 +9643,18 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
         <span class="section-count">${infos.length}</span>
       </div>
       ${infos.map(renderCard).join("")}
+    </div>`;
+  }
+
+  const notEvaluated = activeFindings.filter((f) => f.status === "NOT_EVALUATED" || f.status === "ERROR");
+  if (notEvaluated.length > 0) {
+    cardsHtml += `
+    <div class="finding-section">
+      <div class="section-title section-title-noteval">
+        <span>Not Evaluated Controls & Engine Errors</span>
+        <span class="section-count">${notEvaluated.length}</span>
+      </div>
+      ${notEvaluated.map(renderCard).join("")}
     </div>`;
   }
 
@@ -9585,6 +9863,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     .section-title-warn { color: #d97706; border-bottom-color: rgba(245,158,11,0.25); }
     .section-title-pass { color: #059669; border-bottom-color: rgba(16,185,129,0.25); }
     .section-title-info { color: #0284c7; border-bottom-color: rgba(14,165,233,0.25); }
+    .section-title-noteval { color: #64748b; border-bottom-color: rgba(100,116,139,0.25); }
     .section-count {
       font-size: 12px;
       padding: 1px 8px;
@@ -9607,6 +9886,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     .card-status-warn { border-left-color: #f59e0b; }
     .card-status-pass { border-left-color: #10b981; }
     .card-status-info { border-left-color: #0ea5e9; }
+    .card-status-noteval { border-left-color: #64748b; }
 
     .card-header {
       padding: 10px 14px;
@@ -9802,6 +10082,7 @@ function generateStandaloneHtmlDocument(findings, kind, options = {}) {
     .badge-warning { background: var(--warn-bg); color: var(--warn-text); border: 1px solid var(--warn-border); }
     .badge-pass { background: var(--pass-bg); color: var(--pass-text); border: 1px solid var(--pass-border); }
     .badge-info { background: var(--info-bg); color: var(--info-text); border: 1px solid var(--info-border); }
+    .badge-neutral { background: var(--table-bg); color: var(--text-secondary); border: 1px solid var(--border); }
 
     .report-footer {
       margin-top: 32px;
@@ -10227,10 +10508,10 @@ function checkIssuesExportAllowed() {
 function getExportPayload() {
   const profileFindings = currentFindings;
 
-  const cisPassed = currentFindings.filter((f) => CIS_BENCHMARK_CONTROL_IDS.includes(f.id) && f.status === "PASS").length;
-  const totalPassed = cisPassed;
-  const totalEvaluated = CIS_BENCHMARK_TOTAL_CONTROLS;
-  const cisScore = Math.round((cisPassed / CIS_BENCHMARK_TOTAL_CONTROLS) * 100);
+  const ev = currentFindings.filter((f) => CIS_BENCHMARK_CONTROL_IDS.includes(f.id) && ["PASS", "WARN", "FAIL"].includes(f.status));
+  const cisScore = ev.length ? Math.round((ev.filter(f => f.status === "PASS").length / ev.length) * 100) : null;
+  const totalPassed = ev.filter(f => f.status === "PASS").length;
+  const totalEvaluated = ev.length;
 
   const isOnly = DOM.filterIssuesOnly ? DOM.filterIssuesOnly.checked : false;
   let rawText = DOM.cliInput ? DOM.cliInput.value || "" : "";
@@ -10241,7 +10522,7 @@ function getExportPayload() {
   const opts = {
     lang: currentLang,
     issuesOnly: isOnly,
-    profile: "full",
+    profile: "full", // We always calculate it now
     cisScore,
     totalPassed,
     totalEvaluated,
@@ -10284,8 +10565,10 @@ function updateSummaryCounters(findings) {
       DOM.pillCisScore.classList.remove("is-hidden");
       if (summaryBarEl) summaryBarEl.classList.add("has-cis");
 
-      const passedCount = profileFindings.filter((f) => CIS_BENCHMARK_CONTROL_IDS.includes(f.id) && f.status === "PASS").length;
-      const cisScore = Math.round((passedCount / CIS_BENCHMARK_TOTAL_CONTROLS) * 100);
+      const cisFindings = profileFindings.filter((f) => CIS_BENCHMARK_CONTROL_IDS.includes(f.id) && f.status !== "NOT_EVALUATED");
+      const passedCount = cisFindings.filter((f) => f.status === "PASS").length;
+      const totalEvaluated = cisFindings.length > 0 ? cisFindings.length : CIS_BENCHMARK_TOTAL_CONTROLS;
+      const cisScore = totalEvaluated > 0 ? Math.round((passedCount / totalEvaluated) * 100) : 0;
 
       DOM.countCisScore.textContent = `${cisScore}%`;
 
@@ -10309,7 +10592,10 @@ function updateSummaryCounters(findings) {
   updateSummaryIndicator(filesCount, profileFindings.length);
 
   if (DOM.auditModeBadge) {
-    DOM.auditModeBadge.textContent = "56 Controls (Full Audit)";
+    const totalChecks = (typeof window !== "undefined" && Array.isArray(window.allChecks))
+      ? window.allChecks.length
+      : ALL_CHECKS.length;
+    DOM.auditModeBadge.textContent = `${totalChecks} Controls (Full Audit)`;
   }
 }
 
@@ -10324,7 +10610,10 @@ function setLanguage(lang = "en") {
   currentLang = "en";
 
   if (DOM.auditModeBadge) {
-    DOM.auditModeBadge.textContent = "56 Controls (Full Audit)";
+    const totalChecks = (typeof window !== "undefined" && Array.isArray(window.allChecks))
+      ? window.allChecks.length
+      : ALL_CHECKS.length;
+    DOM.auditModeBadge.textContent = `${totalChecks} Controls (Full Audit)`;
   }
   const ver = (typeof chrome !== "undefined" && chrome?.runtime?.getManifest?.()?.version) || "3.5.0";
   if (DOM.appVersionBadge) {
