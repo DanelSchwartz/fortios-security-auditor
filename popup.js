@@ -118,6 +118,92 @@ function extractDeviceIdentity(text, defaultName = "Primary-FW") {
   return fallback;
 }
 
+extractDeviceIdentity.getAll = function (text) {
+  if (!text) return [];
+  const found = new Set();
+
+  // 1. Live/event logs or syslog tags: appliance=servername, devname=servername, device=servername
+  const logMatches = [...text.matchAll(/(?:^|\s|,|;)(?:appliance|devname|device|dname)\s*[:=]\s*["']?([^"'\r\n\s,;]+)["']?/gi)];
+  for (const lm of logMatches) {
+    const norm = normalizeApplianceName(lm[1], "");
+    if (norm && norm !== ":" && norm !== "Primary-FW") found.add(norm);
+  }
+
+  // 2. Configuration file: set hostname or hostname (bounded to avoid matching server-hostname)
+  const hostConfMatches = [...text.matchAll(/(?:set\s+hostname|(?<![\w-])hostname)\s+["']?([^"'\r\n\s]+)["']?/gi)];
+  for (const hm of hostConfMatches) {
+    const norm = normalizeApplianceName(hm[1], "");
+    if (norm && norm !== ":" && !/^(?:FortiGate|FortiGate-\w+)$/i.test(norm)) found.add(norm);
+    else if (norm && norm !== ":") found.add(norm);
+  }
+
+  // 3. CLI status: Hostname: servername or Appliance: servername
+  const hostCliMatches = [...text.matchAll(/(?:^|\n)\s*(?:Hostname|Appliance)\s*:\s*([^\r\n\s]+)/gi)];
+  for (const cm of hostCliMatches) {
+    const norm = normalizeApplianceName(cm[1], "");
+    if (norm && norm !== ":") found.add(norm);
+  }
+
+  // 4. CLI prompt extraction: e.g. "FW-01 #" or "Branch-FW (root) #"
+  const promptMatches = [...text.matchAll(/(?:^|\n)\s*([A-Za-z0-9_.-]+)(?:\s*\([^)]+\))?\s*#/g)];
+  for (const pm of promptMatches) {
+    const candidate = pm[1].trim();
+    if (/^(?:config|show|edit|next|end|set|get|diagnose|execute)$/i.test(candidate)) continue;
+    const norm = normalizeApplianceName(candidate, "");
+    if (norm && norm !== ":" && !/^(?:FortiGate|FortiGate-\w+)$/i.test(norm)) found.add(norm);
+    else if (norm && norm !== ":") found.add(norm);
+  }
+
+  // 5. Serial number
+  const serialMatches = [...text.matchAll(/(?:Serial-Number|serial)\s*[:=]\s*([A-Za-z0-9_-]+)/gi)];
+  for (const sm of serialMatches) {
+    const norm = normalizeApplianceName(sm[1], "");
+    if (norm && norm !== ":") found.add(norm);
+  }
+
+  return Array.from(found);
+};
+
+extractDeviceIdentity.getScopedSegments = function (text) {
+  if (!text) return [];
+
+  // 1. Multi-backup split on config-version / conf_file_ver
+  const splitRegex = /(?=(?:^|\n)#(?:config-version|conf_file_ver)=[^\r\n]+)/g;
+  const backupParts = text.split(splitRegex).filter((p) => p.trim().length > 0);
+  if (backupParts.length > 1) {
+    return backupParts.map((part, idx) => ({
+      device: extractDeviceIdentity(part, `device-${idx + 1}`),
+      content: part
+    }));
+  }
+
+  // 2. Multi-device CLI prompt boundaries (e.g. FW-01 # ... FW-02 # ...)
+  const promptRe = /(?:^|\n)\s*([A-Za-z0-9_.-]+)(?:\s*\([^)]+\))?\s*#\s*(?:get|show|diagnose|execute)\b/g;
+  const promptHosts = new Set();
+  let pm;
+  while ((pm = promptRe.exec(text)) !== null) {
+    const candidate = pm[1].trim();
+    if (!/^(?:config|show|edit|next|end|set|get|diagnose|execute)$/i.test(candidate)) {
+      promptHosts.add(candidate);
+    }
+  }
+  if (promptHosts.size > 1) {
+    const multiPromptSplit = /(?=(?:^|\n)\s*[A-Za-z0-9_.-]+(?:\s*\([^)]+\))?\s*#\s*(?:get|show|diagnose|execute)\b)/;
+    const promptParts = text.split(multiPromptSplit).filter((p) => p.trim().length > 0);
+    if (promptParts.length > 1) {
+      return promptParts.map((part, idx) => ({
+        device: extractDeviceIdentity(part, `device-${idx + 1}`),
+        content: part
+      }));
+    }
+  }
+
+  return [{
+    device: extractDeviceIdentity(text, "Primary-FW"),
+    content: text
+  }];
+};
+
 const DIAGNOSTIC_COMMANDS = {
   "CIS-MED-01": "show system global | grep -i banner",
   "CIS-HIGH-01": "show system auto-install",
@@ -184,6 +270,88 @@ const DIAGNOSTIC_COMMANDS = {
   "CIS-CERT-01": "get vpn certificate local details"
 };
 
+/**
+ * Maps finding or check ID to its FortiOS configuration path or CLI context.
+ */
+function getFindingTargetConfig(f) {
+  if (!f) return "config system global";
+  if (f.targetConfig) return f.targetConfig;
+  if (f.findingText) {
+    const locMatch = /Location:\s*([^\n\r|]+)/i.exec(f.findingText);
+    if (locMatch) return locMatch[1].trim();
+  }
+  const id = f.id || (typeof f === 'string' ? f : '');
+  const configMap = {
+    "CIS-ADM-01": "config system global",
+    "CIS-ADM-02": "config system global",
+    "CIS-ADM-03": "config system global",
+    "CIS-AUTH-01": "config system password-policy",
+    "CIS-AUTH-02": "config system admin",
+    "CIS-AUTH-03": "config system global",
+    "CIS-TLS-01": "config system global",
+    "CIS-CERT-01": "config vpn ssl settings",
+    "CIS-MGMT-01": "config system snmp community",
+    "CIS-MGMT-02": "config system snmp sysinfo",
+    "CIS-LOG-01": "config log fortianalyzer setting",
+    "CIS-SYS-01": "config system global",
+    "CIS-SYS-02": "config system ntp",
+    "CIS-NTP-01": "config system ntp",
+    "CIS-HIGH-01": "config system auto-install",
+    "CIS-MED-01": "config system global",
+    "CIS-MED-02": "config system dns",
+    "SEC-VIP-01": "config firewall vip",
+    "SEC-VPN-01": "config vpn ssl settings",
+    "SEC-FW-01": "config firewall policy",
+    "SEC-FW-02": "config firewall policy",
+    "SEC-USER-01": "config user local",
+    "SEC-INTF-01": "config system interface",
+    "SEC-HIGH-01": "config system admin",
+    "SEC-HIGH-02": "config system settings",
+    "SEC-MED-01": "config firewall ssl-ssh-profile",
+    "SEC-CRIT-01": "config system interface",
+    "SEC-CRIT-02": "config vpn ssl web portal",
+    "SEC-CRIT-03": "get system status",
+    "SEC-LIFE-01": "get system status",
+    "OPS-HIGH-01": "diagnose test application wad 1000",
+    "OPS-MEM-01": "diagnose test application wad 1000",
+    "OPS-HIGH-02": "diagnose sys ha history read",
+    "OPS-HA-01": "diagnose sys ha history read",
+    "OPS-MED-01": "diagnose debug rating",
+    "OPS-DNS-01": "diagnose debug rating",
+    "OPS-MED-02": "get router info bgp dampening flap-statistics",
+    "OPS-BGP-01": "get router info bgp dampening flap-statistics",
+    "OPS-HA-02": "diagnose sys ha checksum cluster",
+    "OPS-SYS-04": "diagnose sys top 1 1",
+    "SEC-SESS-01": "diagnose firewall auth list",
+    "FAZ-HIGH-01": "diagnose fortilogd lograte-device",
+    "FAZ-FWD-01": "diagnose fortilogd lograte-device",
+    "FAZ-CRIT-01": "diagnose system raid status",
+    "FAZ-DISK-01": "diagnose system raid status",
+    "FGT-SYS-01": "get system status",
+    "FGT-PERF-01": "get system performance status",
+    "FGT-MEM-02": "diagnose hardware sysinfo conserve",
+    "FGT-SESS-01": "diagnose sys session stat",
+    "FGT-RT-BGP-01": "get router info bgp summary",
+    "FGT-RT-OSPF-01": "get router info ospf neighbor",
+    "FGT-HA-01": "get system ha status",
+    "FGT-FG-01": "diagnose autoupdate status",
+    "FGT-IPSEC-01": "get vpn ipsec tunnel summary",
+    "FGT-SDWAN-01": "diagnose sys sdwan health-check",
+    "FGT-FEED-01": "get system external-resource",
+    "FGT-NET-01": "get system interface physical",
+    "FGT-NET-02": "diagnose netlink interface list",
+    "FGT-CERT-01": "get vpn certificate local details",
+    "FGT-BAN-01": "diagnose user ban list",
+    "FGT-LOG-01": "diagnose test application miglogd 6",
+    "FGT-SYS-03": "diagnose debug crashlog read",
+    "FAZ-SYS-01": "get system performance",
+    "FAZ-STOR-01": "diagnose system print df",
+    "FAZ-CONN-01": "diagnose test application oftpd 3",
+    "FAZ-IDX-01": "diagnose fortilogd msgrate"
+  };
+  return configMap[id] || "config system global";
+}
+
 function makeFinding(optionsOrId, ...args) {
   let f;
   if (typeof optionsOrId === "object" && optionsOrId !== null) {
@@ -193,7 +361,7 @@ function makeFinding(optionsOrId, ...args) {
       component,
       status = "INFO",
       category,
-      source = "cli",
+      source,
       deviceId = "Primary-FW",
       deviceName = "",
       diagnosticCmd = "",
@@ -203,6 +371,10 @@ function makeFinding(optionsOrId, ...args) {
       actionText = "",
       findingText = ""
     } = optionsOrId;
+
+    if (!source || typeof source !== "string" || !source.trim()) {
+      throw new Error(`Missing explicit source for finding: ${id || "UNKNOWN"}`);
+    }
 
     const assignedDevId = normalizeApplianceName(
       optionsOrId.appliance || deviceId || deviceName,
@@ -237,7 +409,7 @@ function makeFinding(optionsOrId, ...args) {
       deviceName: assignedDevId,
       appliance: assignedDevId,
       diagnosticCmd: diagnosticCmd || DIAGNOSTIC_COMMANDS[id] || (mappedAltId ? DIAGNOSTIC_COMMANDS[mappedAltId] : "") || "",
-      targetConfig: targetConfig || getFindingTargetConfig({ id }),
+      targetConfig: targetConfig || (typeof getFindingTargetConfig === "function" ? getFindingTargetConfig({ id }) : "") || "",
       data: data || {},
       remediationCli: remediationCli || "",
       actionText: actionText || "",
@@ -251,19 +423,23 @@ function makeFinding(optionsOrId, ...args) {
     const actionText = args[3] || "";
     let remediationCli = "";
     let category = "";
-    let source = "conf";
+    let source = "";
     let targetConfig = "";
 
     if (args.length >= 6) {
-      // Positional with 8 arguments: (id, component, status, findingText, actionText, remCli, category, source)
+      // Positional with 8 arguments: (id, component, status, findingText, actionText, remCli, category, source, targetConfig)
       remediationCli = args[4] || "";
       category = args[5] || "";
-      source = args[6] || "conf";
+      source = args[6] || "";
       targetConfig = args[7] || "";
     } else {
       // Positional with <= 5 arguments: (id, component, status, findingText, actionText, source, targetConfig)
-      source = args[4] || "conf";
+      source = args[4] || "";
       targetConfig = args[5] || "";
+    }
+
+    if (!source || typeof source !== "string" || !source.trim()) {
+      throw new Error(`Missing explicit source for finding: ${id || "UNKNOWN"}`);
     }
 
     const mappedAltId = (
@@ -294,7 +470,7 @@ function makeFinding(optionsOrId, ...args) {
       deviceName: "Primary-FW",
       appliance: "Primary-FW",
       diagnosticCmd: DIAGNOSTIC_COMMANDS[id] || (mappedAltId ? DIAGNOSTIC_COMMANDS[mappedAltId] : "") || "",
-      targetConfig: targetConfig || getFindingTargetConfig({ id }),
+      targetConfig: targetConfig || (typeof getFindingTargetConfig === "function" ? getFindingTargetConfig({ id }) : "") || "",
       data: {},
       remediationCli: remediationCli || "",
       actionText: actionText || "",
@@ -474,7 +650,7 @@ function renderFindingText(f, lang = "en") {
         if (f.status === "PASS") {
           return `סיכומי התצורה של אשכול ה-HA (גלובלי וכל ה-VDOMs) זהים בכל ${d.memberCount ?? 2} חברי האשכול.`;
         } else if (f.status === "INFO") {
-          return "רק חבר אשכול אחד קיים בפלט — השוואת תצורה דורשת פלט מכל חברי ה-HA.";
+          return "רק חבר אשכול אחד קיים בפלט - השוואת תצורה דורשת פלט מכל חברי ה-HA.";
         } else {
           return `זוהתה אי-התאמה (Drift) בתצורת ה-HA: סיכומי ביקורת שונים מול ה-Primary ב-Scope: ${(d.mismatchedScopes || []).join(", ") || "VDOM/global"}.`;
         }
@@ -482,7 +658,7 @@ function renderFindingText(f, lang = "en") {
       if (f.status === "PASS") {
         return `HA cluster configuration checksums (global + all VDOM scopes) are identical across all ${d.memberCount ?? 2} cluster members.`;
       } else if (f.status === "INFO") {
-        return "Only one cluster member present in output — drift comparison requires checksum output from all HA members.";
+        return "Only one cluster member present in output - drift comparison requires checksum output from all HA members.";
       } else {
         return f.findingText || `HA configuration drift detected across cluster members.`;
       }
@@ -492,13 +668,13 @@ function renderFindingText(f, lang = "en") {
         if (f.status === "PASS") {
           return `התהליך המוביל בניצול משאבים הוא '${d.name || "daemon"}' (PID ${d.pid || 0}) ב-${d.cpuPct ?? 0}% CPU, בטווח התקין.`;
         } else {
-          return `תהליך '${d.name || "daemon"}' (PID ${d.pid || 0}, מצב ${d.state || "R"}) צורך ${d.cpuPct ?? 0}% CPU ו-${d.memPct ?? 0}% זיכרון — צרכן המשאבים המוביל בצילום מצב זה.`;
+          return `תהליך '${d.name || "daemon"}' (PID ${d.pid || 0}, מצב ${d.state || "R"}) צורך ${d.cpuPct ?? 0}% CPU ו-${d.memPct ?? 0}% זיכרון - צרכן המשאבים המוביל בצילום מצב זה.`;
         }
       }
       if (f.status === "PASS") {
         return `Top process by resource usage is '${d.name || "daemon"}' (PID ${d.pid || 0}) at ${d.cpuPct ?? 0}% CPU, within normal range.`;
       } else {
-        return `Process '${d.name || "daemon"}' (PID ${d.pid || 0}, state ${d.state || "R"}) is consuming ${d.cpuPct ?? 0}% CPU and ${d.memPct ?? 0}% memory — the top resource consumer in this snapshot.`;
+        return `Process '${d.name || "daemon"}' (PID ${d.pid || 0}, state ${d.state || "R"}) is consuming ${d.cpuPct ?? 0}% CPU and ${d.memPct ?? 0}% memory - the top resource consumer in this snapshot.`;
       }
 
     case "SEC-SESS-01":
@@ -555,7 +731,14 @@ function extractCommandOutput(text, commandPattern) {
   const cmdStr = typeof commandPattern === "string" 
     ? commandPattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
     : commandPattern.source;
-  const cmdRegex = new RegExp(`(?:^|[#$]|\\n)\\s*${cmdStr}[^\\r\\n]*([\\s\\S]*?)(?=\\r?\\n[A-Za-z0-9_.-]+(?:\\s*\\([^)]+\\))?\\s*[#$]|\\r?\\n\\s*(?:get|show|diagnose|execute)\\s+\\S|\\n\\s*--More--|$)`, "i");
+
+  const hasPrompts = /(?:^|\n)\s*[A-Za-z0-9_.-]+(?:\s*\([^)]+\))?\s*[#$]\s*(?:get|show|diagnose|execute)\b/i.test(text);
+
+  const delimiter = hasPrompts
+    ? "(?=\\r?\\n\\s*[A-Za-z0-9_.-]+(?:\\s*\\([^)]+\\))?\\s*[#$]|\\r?\\n\\s*--More--|$)"
+    : "(?=\\r?\\n\\s*(?:get|show|diagnose|execute)\\s+\\S|\\r?\\n\\s*--More--|$)";
+
+  const cmdRegex = new RegExp("(?:^|[#$]|\\n)\\s*" + cmdStr + "[^\\r\\n]*([\\s\\S]*?)" + delimiter, "i");
   const match = cmdRegex.exec(text);
   return match && match[1] ? match[1].trim() : "";
 }
@@ -618,26 +801,30 @@ function getFormattedTimestampFilename() {
 function detectInputKind(text) {
   if (!text || !text.trim()) return "none";
 
+  // Full configuration backup header check MUST take precedence over CLI substring matching
+  const hasFullBackupHeader = /#(?:config-version|conf_file_ver)=/i.test(text);
+  if (hasFullBackupHeader) {
+    return "conf";
+  }
+
   const hasFgtCliMarkers =
     /(?:^|\n)\s*#?\s*(?:get\s+system\s+status|get\s+system\s+performance\s+status|get\s+system\s+ha\s+status|diagnose\s+autoupdate\s+status|get\s+vpn\s+ipsec\s+tunnel\s+summary|diagnose\s+sys\s+sdwan\s+health-check|get\s+system\s+external-resource|show\s+system\s+interface|show\s+user\s+local|diagnose\s+user\s+ban\s+list|diagnose\s+test\s+application\s+miglogd|diagnose\s+hardware\s+sysinfo\s+conserve|diagnose\s+sys\s+session\s+stat|get\s+router\s+info\s+bgp\s+summary|get\s+router\s+info\s+ospf\s+neighbor|get\s+system\s+interface\s+physical|diagnose\s+netlink\s+interface\s+list|get\s+vpn\s+certificate\s+local|diagnose\s+debug\s+crashlog\s+read)\b/i.test(text) ||
-    /FDN availability\s*:/i.test(text) ||
+    /(?:^|\n)\s*FDN availability\s*:/i.test(text) ||
     /selectors\(total,up\):/i.test(text) ||
-    /HA Health Status\s*:/i.test(text) ||
+    /(?:^|\n)\s*HA Health Status\s*:/i.test(text) ||
     /memory conserve mode:\s*(?:on|off)/i.test(text) ||
-    /session_count=\d+/i.test(text);
+    /(?:misc info:\s*|session stat:\s*)session_count=\d+/i.test(text);
 
   const hasFazCliMarkers =
     /Platform Full Name\s*:\s*FortiAnalyzer/i.test(text) ||
     /FortiAnalyzer-VM/i.test(text) ||
     /\bFAZVM\d*\b/i.test(text) ||
     /(?:^|\n)\s*#?\s*(?:diagnose\s+system\s+print\s+df|diagnose\s+log\s+device|diagnose\s+test\s+application\s+oftpd|diagnose\s+fortilogd\s+msgrate|diagnose\s+test\s+application\s+sqlplugind)\b/i.test(text) ||
-    /System Storage Summary/i.test(text) ||
+    /(?:^|\n)\s*System Storage Summary/i.test(text) ||
     /Log insert speed:\s*logs\//i.test(text);
 
   const hasConfigMarkers =
-    /#conf_file_ver=/i.test(text) ||
-    /#config-version=/i.test(text) ||
-    (/(?:^|\n)\s*config\s+(?:firewall|vpn|router|switch)\b/i.test(text) && !hasFgtCliMarkers);
+    /(?:^|\n)\s*config\s+(?:firewall|vpn|router|switch|system|user)\b/i.test(text);
 
   if (hasFgtCliMarkers && hasFazCliMarkers) {
     return "dual";
@@ -673,7 +860,7 @@ function checkFgtSystemUptime(text) {
   if (!hasUptimeHeader) return null;
 
   const uptimeMatch =
-    /(?:System\s+)?[Uu]ptime\s*:?\s*([0-9]+\s*days?,?\s*[0-9]+\s*hours?(?:,?\s*[0-9]+\s*minutes?)?|[0-9]+\s*hours?,?\s*[0-9]+\s*minutes?)/i.exec(
+    /(?:System\s+)?[Uu]ptime\s*:?\s*([0-9]+\s*days?(?:[,\s]+[0-9]+\s*hours?)?(?:[,\s]+[0-9]+\s*min(?:ute)?s?)?|[0-9]+\s*hours?(?:[,\s]+[0-9]+\s*min(?:ute)?s?)?|[0-9]+\s*min(?:ute)?s?)/i.exec(
       text
     );
 
@@ -682,7 +869,7 @@ function checkFgtSystemUptime(text) {
   const raw = uptimeMatch[1].trim();
   const dayMatch = /([0-9]+)\s*days?/i.exec(raw);
   const hourMatch = /([0-9]+)\s*hours?/i.exec(raw);
-  const minMatch = /([0-9]+)\s*minutes?/i.exec(raw);
+  const minMatch = /([0-9]+)\s*min(?:ute)?s?/i.exec(raw);
 
   const days = dayMatch ? parseInt(dayMatch[1], 10) : 0;
   const hours = hourMatch ? parseInt(hourMatch[1], 10) : 0;
@@ -2012,7 +2199,7 @@ function checkFgtFortiGuardSync(text) {
       id: "FGT-FG-01",
       component: "FortiGuard Sync",
       status: "FAIL",
-      findingText: "FDN availability reported as 'unavailable' — FortiGate is unable to communicate with FortiGuard servers for signature/definition updates.",
+      findingText: "FDN availability reported as 'unavailable' - FortiGate is unable to communicate with FortiGuard servers for signature/definition updates.",
       actionText: "Check DNS and egress ports (UDP/TCP 8888, 443). Refer to Fortinet Community KB and update client if unresolved.",
       source: "cli",
     });
@@ -2403,7 +2590,7 @@ function checkFgtThreatFeeds(text, tokenizer = null) {
       id: "FGT-FEED-01",
       component: "FortiGate Threat Feeds",
       status: "WARN",
-      findingText: "get system external-resource output is empty — no external threat feed resources configured on the firewall.",
+      findingText: "get system external-resource output is empty - no external threat feed resources configured on the firewall.",
       actionText: "Check connectivity to external resource URLs and verify refreshing status.",
       source: src,
       data: { count: 0, feeds: "" }
@@ -2464,10 +2651,40 @@ function checkFgtThreatFeeds(text, tokenizer = null) {
   });
 }
 
+function isPublicIp(ipStr) {
+  if (!ipStr || typeof ipStr !== "string") return false;
+  const match = /(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})/.exec(ipStr.trim());
+  if (!match) return false;
+  const o1 = parseInt(match[1], 10);
+  const o2 = parseInt(match[2], 10);
+  const o3 = parseInt(match[3], 10);
+  const o4 = parseInt(match[4], 10);
+  if (o1 > 255 || o2 > 255 || o3 > 255 || o4 > 255) return false;
+
+  // 0.0.0.0/8 (Current network / unassigned)
+  if (o1 === 0) return false;
+  // 10.0.0.0/8 (RFC1918)
+  if (o1 === 10) return false;
+  // 100.64.0.0/10 (Shared Address Space / CGNAT RFC6598)
+  if (o1 === 100 && o2 >= 64 && o2 <= 127) return false;
+  // 127.0.0.0/8 (Loopback)
+  if (o1 === 127) return false;
+  // 169.254.0.0/16 (Link Local RFC3927)
+  if (o1 === 169 && o2 === 254) return false;
+  // 172.16.0.0/12 (RFC1918)
+  if (o1 === 172 && o2 >= 16 && o2 <= 31) return false;
+  // 192.168.0.0/16 (RFC1918)
+  if (o1 === 192 && o2 === 168) return false;
+  // 224.0.0.0/4 (Multicast / Reserved)
+  if (o1 >= 224) return false;
+
+  return true;
+}
+
 /**
  * SEC-INTF-01: Administrative Access on WAN
  * Supported in both Static Config and Live CLI (show system interface | grep -i allowaccess).
- * Inspect interface blocks where set role wan or alias/name contains "wan"/"isp"/"internet".
+ * Inspect interface blocks where set role wan, alias/name contains "wan"/"isp"/"internet", or has public IP.
  * FAIL: If set allowaccess includes https, ssh, http, or telnet.
  * Action: "Disable administrative access on external interface and document in client misconfiguration tracker."
  * PASS: Management access restricted to internal/dedicated management interfaces.
@@ -2492,6 +2709,7 @@ function checkSecWanAdminAccess(text, tokenizer = null) {
           role: (entry.properties["role"] || "").toLowerCase(),
           alias: (entry.properties["alias"] || "").toLowerCase(),
           allowaccess: (entry.properties["allowaccess"] || "").toLowerCase(),
+          ip: entry.properties["ip"] || "",
           source: "conf",
         });
       }
@@ -2509,12 +2727,14 @@ function checkSecWanAdminAccess(text, tokenizer = null) {
 
       const roleMatch = /set\s+role\s+(\S+)/i.exec(body);
       const aliasMatch = /set\s+alias\s+(?:"([^"]+)"|(\S+))/i.exec(body);
+      const ipMatch = /set\s+ip\s+([^\n]+)/i.exec(body);
 
       entries.push({
         name,
         role: roleMatch ? roleMatch[1].toLowerCase() : "",
         alias: aliasMatch ? (aliasMatch[1] || aliasMatch[2]).toLowerCase() : "",
         allowaccess: allowMatch[1].toLowerCase(),
+        ip: ipMatch ? ipMatch[1].trim() : "",
         source: "cli",
       });
     }
@@ -2525,11 +2745,19 @@ function checkSecWanAdminAccess(text, tokenizer = null) {
   const offendingInterfaces = [];
 
   for (const intf of entries) {
-    const isExternal =
+    const isExplicitNonWan =
+      intf.role === "lan" ||
+      intf.role === "dmz" ||
+      /\b(lan|internal|mgmt|management|inside|trust|dmz)\b/i.test(intf.alias) ||
+      /\b(lan|internal|mgmt|management|inside|trust|dmz)\b/i.test(intf.name);
+
+    const isExternal = !isExplicitNonWan && (
       intf.role === "wan" ||
-      /\b(wan|isp|internet)\b/i.test(intf.alias) ||
-      /\b(wan|isp|internet)\b/i.test(intf.name) ||
-      intf.name.toLowerCase().startsWith("wan");
+      /\b(wan|isp|internet|external|outside|public)\b/i.test(intf.alias) ||
+      /\b(wan|isp|internet|external|outside|public)\b/i.test(intf.name) ||
+      intf.name.toLowerCase().startsWith("wan") ||
+      isPublicIp(intf.ip)
+    );
 
     if (isExternal) {
       const exposedProtocols = [];
@@ -2608,9 +2836,10 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
       if (userSection && Object.keys(userSection.entries).length > 0) {
         for (const [name, entry] of Object.entries(userSection.entries)) {
           if (!users.some((u) => u.name === name)) {
+            const rawType = entry.properties["type"];
             users.push({
               name,
-              type: (entry.properties["type"] || "password").replace(/^"+|"+$/g, "").toLowerCase(),
+              type: rawType ? rawType.replace(/^"+|"+$/g, "").toLowerCase() : "UNKNOWN",
               twoFactor: entry.properties["two-factor"] ? entry.properties["two-factor"].replace(/^"+|"+$/g, "").toLowerCase() : null,
               source: "conf",
             });
@@ -2641,7 +2870,7 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
       const tfMatch = /set\s+two-factor\s+(\S+)/i.exec(body);
       users.push({
         name,
-        type: typeMatch ? typeMatch[1].replace(/^"+|"+$/g, "").toLowerCase() : "password",
+        type: typeMatch ? typeMatch[1].replace(/^"+|"+$/g, "").toLowerCase() : "UNKNOWN",
         twoFactor: tfMatch ? tfMatch[1].replace(/^"+|"+$/g, "").toLowerCase() : null,
         source: "cli",
       });
@@ -2661,9 +2890,10 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
   const insecurePasswordAccounts = [];
   const remoteAuthAccounts = [];
   const compliantMfaAccounts = [];
+  const unknownTypeAccounts = [];
 
   for (const user of users) {
-    const type = user.type || "password";
+    const type = user.type || "UNKNOWN";
     const hasMfa = !!(
       user.twoFactor &&
       user.twoFactor !== "disable" &&
@@ -2677,6 +2907,8 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
         insecurePasswordAccounts.push(user.name);
       } else if (type === "ldap" || type === "radius" || type.startsWith("tacacs")) {
         remoteAuthAccounts.push(user.name);
+      } else if (type === "UNKNOWN") {
+        unknownTypeAccounts.push(user.name);
       }
     }
   }
@@ -2694,6 +2926,20 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
   const actionText =
     "Enforce FortiToken Mobile or Email MFA on all local password users. Ensure remote RADIUS/LDAP users are challenged with MFA at the IdP/Server level.";
 
+  if (unknownTypeAccounts.length > 0 && insecurePasswordAccounts.length === 0) {
+    return makeFinding({
+      id: "SEC-USER-01",
+      component: "User Authentication & MFA",
+      status: "NOT_EVALUATED",
+      category: "SecOps Operational",
+      source: primarySource,
+      data: { isSaml: hasGlobalSaml, insecurePasswordAccounts, remoteAuthAccounts, compliantMfaAccounts, unknownTypeAccounts },
+      findingText: `Control not evaluated: User authentication type could not be determined for account(s): ${formatAccountList(unknownTypeAccounts)}. Missing explicit 'set type' configuration.`,
+      actionText: "Verify and configure explicit user authentication type (e.g., password, ldap, radius).",
+      remediationCli: remCli,
+    });
+  }
+
   const isFail = insecurePasswordAccounts.length > 0;
   const header = isFail
     ? "Critical Incomplete MFA Coverage on FortiGate:"
@@ -2709,6 +2955,9 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
   if (remoteAuthAccounts.length > 0) {
     lines.push(`  • Remote Auth (LDAP/RADIUS) Accounts (${remoteAuthAccounts.length}): ${formatAccountList(remoteAuthAccounts)}`);
     lines.push(`    * Note: MFA status for remote users cannot be verified from local config. Ensure MFA is enforced on the remote authentication server.`);
+  }
+  if (unknownTypeAccounts.length > 0) {
+    lines.push(`  • Unknown Authentication Type Accounts (${unknownTypeAccounts.length}): ${formatAccountList(unknownTypeAccounts)}`);
   }
   
   if (hasGlobalSaml) {
@@ -2727,7 +2976,7 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
       status: remoteAuthAccounts.length > 0 ? "INFO" : "PASS",
       category: "SecOps Operational",
       source: primarySource,
-      data: { isSaml: hasGlobalSaml, insecurePasswordAccounts, remoteAuthAccounts, compliantMfaAccounts },
+      data: { isSaml: hasGlobalSaml, insecurePasswordAccounts, remoteAuthAccounts, compliantMfaAccounts, unknownTypeAccounts },
       findingText: lines.join("\n"),
       actionText: remoteAuthAccounts.length > 0 ? "Verify MFA enforcement on RADIUS/LDAP servers." : "",
       remediationCli: remCli,
@@ -2740,7 +2989,7 @@ function checkSecLocalUsersMfa(text, tokenizer = null) {
     status: "FAIL",
     category: "SecOps Operational",
     source: primarySource,
-    data: { isSaml: hasGlobalSaml, insecurePasswordAccounts, remoteAuthAccounts, compliantMfaAccounts },
+    data: { isSaml: hasGlobalSaml, insecurePasswordAccounts, remoteAuthAccounts, compliantMfaAccounts, unknownTypeAccounts },
     findingText: lines.join("\n"),
     actionText,
     remediationCli: remCli,
@@ -2839,7 +3088,7 @@ function checkFgtMiglogd(text) {
     id: "FGT-LOG-01",
     component: "FortiGate Log Delivery",
     status: "WARN",
-    findingText: "miglogd reports faz=0 — no logs are currently being forwarded to the FortiAnalyzer.",
+    findingText: "miglogd reports faz=0 - no logs are currently being forwarded to the FortiAnalyzer.",
     actionText: "Verify network reachability to FortiAnalyzer and confirm firewall policy logging ('set logtraffic all') is enabled.",
     source: "cli",
   });
@@ -3837,7 +4086,8 @@ function checkOpsWadWorkers(text) {
     actionText: "Restart deadlocked WAD proxy worker pool or upgrade to resolve memory leak defect.",
     remediationCli: "diagnose test application wad 99",
     diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-MEM-01"],
-    targetConfig: "diagnose test application wad 1000"
+    targetConfig: "diagnose test application wad 1000",
+    source: "cli"
   });
 }
 
@@ -3880,7 +4130,8 @@ function checkOpsHaHistory(text) {
     actionText: "Investigate HA heartbeat link stability and peer checksum discrepancies.",
     remediationCli: "diagnose sys ha checksum recalculate\ndiagnose sys ha checksum show",
     diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-HA-01"],
-    targetConfig: "diagnose sys ha history read"
+    targetConfig: "diagnose sys ha history read",
+    source: "cli"
   });
 }
 
@@ -3934,7 +4185,7 @@ function checkOpsHaClusterChecksum(text) {
       status: "INFO",
       source: "cli",
       data: { memberCount: memberBlocks.length, members: memberBlocks },
-      findingText: "Only one cluster member present in output — drift comparison requires checksum output from all HA members.",
+      findingText: "Only one cluster member present in output - drift comparison requires checksum output from all HA members.",
       actionText: "",
       remediationCli: "",
       diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-HA-02"] || "diagnose sys ha checksum cluster",
@@ -4057,7 +4308,8 @@ function checkOpsRatingServers(text) {
     actionText: "Flush FortiGuard Anycast cache or transition to HTTPS over port 443.",
     remediationCli: `diagnose webfilter fortiguard cache flush\nconfig system fortiguard\n    set fortiguard-anycast disable\n    set protocol https\n    set port 443\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-DNS-01"],
-    targetConfig: "diagnose debug rating"
+    targetConfig: "diagnose debug rating",
+    source: "cli"
   });
 }
 
@@ -4101,7 +4353,8 @@ function checkOpsBgpDampening(text) {
     actionText: "Inspect upstream peer BGP advertisement stability and tune route-flap dampening half-life.",
     remediationCli: `config router bgp\n    set dampening enable\n    set dampening-half-life 15\nend`,
     diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-BGP-01"],
-    targetConfig: "get router info bgp dampening flap-statistics"
+    targetConfig: "get router info bgp dampening flap-statistics",
+    source: "cli"
   });
 }
 
@@ -4164,8 +4417,8 @@ function checkOpsProcessCpu(text) {
       status: "WARN",
       source: "cli",
       data,
-      findingText: `Process '${name}' (PID ${pid}, state ${state}) is consuming ${cpuPct}% CPU and ${memPct}% memory — the top resource consumer in this snapshot.`,
-      actionText: `If '${name}' remains the top consumer across repeated checks, capture a longer sample with 'diagnose sys top 5 5' and review that daemon's debug output (e.g. 'diagnose debug application ${name} -1') before considering a restart via 'diagnose sys process pidof ${name}' + 'diagnose sys kill 11 ${pid}' — the kill command is destructive, mention it only as a last-resort reference, never as an auto-suggested first step.`,
+      findingText: `Process '${name}' (PID ${pid}, state ${state}) is consuming ${cpuPct}% CPU and ${memPct}% memory - the top resource consumer in this snapshot.`,
+      actionText: `If '${name}' remains the top consumer across repeated checks, capture a longer sample with 'diagnose sys top 5 5' and review that daemon's debug output (e.g. 'diagnose debug application ${name} -1') before considering a restart via 'diagnose sys process pidof ${name}' + 'diagnose sys kill 11 ${pid}' - the kill command is destructive, mention it only as a last-resort reference, never as an auto-suggested first step.`,
       remediationCli: "",
       diagnosticCmd: DIAGNOSTIC_COMMANDS["OPS-SYS-04"] || "diagnose sys top 1 1",
       targetConfig: "diagnose sys top 1 1"
@@ -4304,7 +4557,7 @@ function checkSecAuthSessions(text) {
       (u) => `  • User '${u.username}': ${u.ips.length} sessions (${u.ips.join(", ")})`
     );
     findingsList.push(
-      `Concurrent authenticated sessions detected across multiple source IPs for ${duplicateUsers.length} user(s):\n${dupLines.join("\n")}\nThis can indicate shared credentials, a VPN client reconnect that left a stale entry, or legitimate multi-device use — cross-check session start times and known user devices before treating this as an incident.`
+      `Concurrent authenticated sessions detected across multiple source IPs for ${duplicateUsers.length} user(s):\n${dupLines.join("\n")}\nThis can indicate shared credentials, a VPN client reconnect that left a stale entry, or legitimate multi-device use - cross-check session start times and known user devices before treating this as an incident.`
     );
     actionList.push(
       "Cross-check session start times and known user devices before treating concurrent sessions as an incident. If unauthorized, verify VPN reconnection logs."
@@ -4327,7 +4580,7 @@ function checkSecAuthSessions(text) {
     }
 
     findingsList.push(
-      `Stale/expired session entries (expire <= 0) still present in active session table for ${staleUserMap.size} user(s):\n${staleLines.join("\n")}\nThis typically indicates a session cleanup/GC delay on the device rather than a security event — if it persists across repeated checks, filter and clear the session via CLI to force a clean re-authentication.`
+      `Stale/expired session entries (expire <= 0) still present in active session table for ${staleUserMap.size} user(s):\n${staleLines.join("\n")}\nThis typically indicates a session cleanup/GC delay on the device rather than a security event - if it persists across repeated checks, filter and clear the session via CLI to force a clean re-authentication.`
     );
     actionList.push(
       "If stale/expired session entries persist across repeated checks, filter and clear the session via CLI: diagnose firewall auth filter user <username> followed by diagnose firewall auth clear."
@@ -4388,7 +4641,8 @@ function checkFazSilentForwarder(text) {
     actionText: "Verify firewall miglogd daemon transmission and inspect network logging filters.",
     remediationCli: "diagnose test application miglogd 6",
     diagnosticCmd: DIAGNOSTIC_COMMANDS["FAZ-FWD-01"],
-    targetConfig: "diagnose fortilogd lograte-device"
+    targetConfig: "diagnose fortilogd lograte-device",
+    source: "cli"
   });
 }
 
@@ -4433,7 +4687,8 @@ function checkFazRaidHealth(text) {
     actionText: "Replace defective physical hard disk drive and verify automatic array rebuild.",
     remediationCli: "diagnose system raid status",
     diagnosticCmd: DIAGNOSTIC_COMMANDS["FAZ-DISK-01"],
-    targetConfig: "diagnose system raid status"
+    targetConfig: "diagnose system raid status",
+    source: "cli"
   });
 }
 
@@ -4702,7 +4957,7 @@ function getKnownWanInterfaces(tokenizer, text) {
   const wanSet = new Set();
   const excludedSet = new Set();
 
-  function evaluateInterface(name, role, alias) {
+  function evaluateInterface(name, role, alias, ip = "") {
     const lowerName = (name || "").toLowerCase().trim();
     const lowerRole = (role || "").toLowerCase().trim();
     const lowerAlias = (alias || "").toLowerCase().trim();
@@ -4725,7 +4980,8 @@ function getKnownWanInterfaces(tokenizer, text) {
       lowerRole === "wan" ||
       /\b(wan|isp|internet|external|outside|public)\b/i.test(lowerAlias) ||
       /\b(wan|isp|internet|external|outside|public)\b/i.test(lowerName) ||
-      lowerName.startsWith("wan")
+      lowerName.startsWith("wan") ||
+      isPublicIp(ip)
     ) {
       wanSet.add(lowerName);
     }
@@ -4737,8 +4993,9 @@ function getKnownWanInterfaces(tokenizer, text) {
       const origName = entry.name || entry._origKey || key;
       const role = (entry.properties["role"] || "").toLowerCase();
       const alias = (entry.properties["alias"] || "").toLowerCase();
-      evaluateInterface(origName, role, alias);
-      evaluateInterface(key, role, alias);
+      const ip = entry.properties["ip"] || "";
+      evaluateInterface(origName, role, alias, ip);
+      evaluateInterface(key, role, alias, ip);
     }
   }
 
@@ -4752,9 +5009,11 @@ function getKnownWanInterfaces(tokenizer, text) {
         const body = m[3];
         const roleM = /set\s+role\s+(\S+)/i.exec(body);
         const aliasM = /set\s+alias\s+(?:"([^"]+)"|(\S+))/i.exec(body);
+        const ipM = /set\s+ip\s+([^\n]+)/i.exec(body);
         const role = roleM ? roleM[1].toLowerCase() : "";
         const alias = aliasM ? (aliasM[1] || aliasM[2]).toLowerCase() : "";
-        evaluateInterface(name, role, alias);
+        const ip = ipM ? ipM[1].trim() : "";
+        evaluateInterface(name, role, alias, ip);
       }
     }
   }
@@ -8694,7 +8953,10 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
       if (res) {
         if (Array.isArray(res)) {
           for (const item of res) {
-            item.deviceId = normalizeApplianceName(item.appliance || item.deviceId || normalizedDev, normalizedDev);
+            const explicitDev = (item.appliance && item.appliance !== "Primary-FW")
+              ? item.appliance
+              : ((item.deviceId && item.deviceId !== "Primary-FW") ? item.deviceId : normalizedDev);
+            item.deviceId = normalizeApplianceName(explicitDev, normalizedDev);
             item.deviceName = item.deviceId;
             item.appliance = item.deviceId;
             rawFindings.push(item);
@@ -8703,7 +8965,10 @@ function runAnalysisForDevice(deviceText, deviceId = "default") {
             }
           }
         } else {
-          res.deviceId = normalizeApplianceName(res.appliance || res.deviceId || normalizedDev, normalizedDev);
+          const explicitDev = (res.appliance && res.appliance !== "Primary-FW")
+            ? res.appliance
+            : ((res.deviceId && res.deviceId !== "Primary-FW") ? res.deviceId : normalizedDev);
+          res.deviceId = normalizeApplianceName(explicitDev, normalizedDev);
           res.deviceName = res.deviceId;
           res.appliance = res.deviceId;
           rawFindings.push(res);
@@ -8762,13 +9027,14 @@ function runAnalysis(rawText, fileChunks = []) {
       allRawFindings.push(...findings);
     }
   } else {
-    // Check if rawText contains multiple #config-version boundaries
-    const splitRegex = /(?=(?:^|\n)#config-version=[^\r\n]+)/g;
-    const parts = rawText.split(splitRegex).filter((p) => p.trim().length > 0);
-    if (parts.length > 1) {
-      parts.forEach((part, idx) => {
-        const devId = extractDeviceIdentity(part, `device-${idx + 1}`);
-        const findings = runAnalysisForDevice(part, devId);
+    const segments = extractDeviceIdentity.getScopedSegments(rawText);
+    if (segments.length > 1) {
+      segments.forEach((seg, idx) => {
+        const fallbackName = (!isTextareaEdited && fileChunks && fileChunks[idx] && fileChunks[idx].name)
+          ? fileChunks[idx].name
+          : `device-${idx + 1}`;
+        const devId = seg.device && seg.device !== "Primary-FW" ? seg.device : fallbackName;
+        const findings = runAnalysisForDevice(seg.content, devId);
         allRawFindings.push(...findings);
       });
     } else {
@@ -8914,87 +9180,7 @@ function extractDeviceMetadata(findings = [], kind = "conf", text = "") {
   };
 }
 
-/**
- * Maps finding or check ID to its FortiOS configuration path or CLI context.
- */
-function getFindingTargetConfig(f) {
-  if (!f) return "config system global";
-  if (f.targetConfig) return f.targetConfig;
-  if (f.findingText) {
-    const locMatch = /Location:\s*([^\n\r|]+)/i.exec(f.findingText);
-    if (locMatch) return locMatch[1].trim();
-  }
-  const id = f.id || (typeof f === 'string' ? f : '');
-  const configMap = {
-    "CIS-ADM-01": "config system global",
-    "CIS-ADM-02": "config system global",
-    "CIS-ADM-03": "config system global",
-    "CIS-AUTH-01": "config system password-policy",
-    "CIS-AUTH-02": "config system admin",
-    "CIS-AUTH-03": "config system global",
-    "CIS-TLS-01": "config system global",
-    "CIS-CERT-01": "config vpn ssl settings",
-    "CIS-MGMT-01": "config system snmp community",
-    "CIS-MGMT-02": "config system snmp sysinfo",
-    "CIS-LOG-01": "config log fortianalyzer setting",
-    "CIS-SYS-01": "config system global",
-    "CIS-SYS-02": "config system ntp",
-    "CIS-NTP-01": "config system ntp",
-    "CIS-HIGH-01": "config system auto-install",
-    "CIS-MED-01": "config system global",
-    "CIS-MED-02": "config system dns",
-    "SEC-VIP-01": "config firewall vip",
-    "SEC-VPN-01": "config vpn ssl settings",
-    "SEC-FW-01": "config firewall policy",
-    "SEC-FW-02": "config firewall policy",
-    "SEC-USER-01": "config user local",
-    "SEC-INTF-01": "config system interface",
-    "SEC-HIGH-01": "config system admin",
-    "SEC-HIGH-02": "config system settings",
-    "SEC-MED-01": "config firewall ssl-ssh-profile",
-    "SEC-CRIT-01": "config system interface",
-    "SEC-CRIT-02": "config vpn ssl web portal",
-    "SEC-CRIT-03": "get system status",
-    "SEC-LIFE-01": "get system status",
-    "OPS-HIGH-01": "diagnose test application wad 1000",
-    "OPS-MEM-01": "diagnose test application wad 1000",
-    "OPS-HIGH-02": "diagnose sys ha history read",
-    "OPS-HA-01": "diagnose sys ha history read",
-    "OPS-MED-01": "diagnose debug rating",
-    "OPS-DNS-01": "diagnose debug rating",
-    "OPS-MED-02": "get router info bgp dampening flap-statistics",
-    "OPS-BGP-01": "get router info bgp dampening flap-statistics",
-    "OPS-HA-02": "diagnose sys ha checksum cluster",
-    "OPS-SYS-04": "diagnose sys top 1 1",
-    "SEC-SESS-01": "diagnose firewall auth list",
-    "FAZ-HIGH-01": "diagnose fortilogd lograte-device",
-    "FAZ-FWD-01": "diagnose fortilogd lograte-device",
-    "FAZ-CRIT-01": "diagnose system raid status",
-    "FAZ-DISK-01": "diagnose system raid status",
-    "FGT-SYS-01": "get system status",
-    "FGT-PERF-01": "get system performance status",
-    "FGT-MEM-02": "diagnose hardware sysinfo conserve",
-    "FGT-SESS-01": "diagnose sys session stat",
-    "FGT-RT-BGP-01": "get router info bgp summary",
-    "FGT-RT-OSPF-01": "get router info ospf neighbor",
-    "FGT-HA-01": "get system ha status",
-    "FGT-FG-01": "diagnose autoupdate status",
-    "FGT-IPSEC-01": "get vpn ipsec tunnel summary",
-    "FGT-SDWAN-01": "diagnose sys sdwan health-check",
-    "FGT-FEED-01": "get system external-resource",
-    "FGT-NET-01": "get system interface physical",
-    "FGT-NET-02": "diagnose netlink interface list",
-    "FGT-CERT-01": "get vpn certificate local details",
-    "FGT-BAN-01": "diagnose user ban list",
-    "FGT-LOG-01": "diagnose test application miglogd 6",
-    "FGT-SYS-03": "diagnose debug crashlog read",
-    "FAZ-SYS-01": "get system performance",
-    "FAZ-STOR-01": "diagnose system print df",
-    "FAZ-CONN-01": "diagnose test application oftpd 3",
-    "FAZ-IDX-01": "diagnose fortilogd msgrate",
-  };
-  return configMap[id] || "config system global";
-}
+
 
 function formatFindingHtml(rawText) {
   if (!rawText) return "";
