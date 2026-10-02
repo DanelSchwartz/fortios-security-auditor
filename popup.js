@@ -76,29 +76,33 @@ function extractDeviceIdentity(text, defaultName = "Primary-FW") {
   const fallback = normalizeApplianceName(defaultName, "Primary-FW");
   if (!text) return fallback;
 
-  // 1. Live/event logs or syslog tags: appliance=servername, devname=servername, device=servername
+  // 1. Explicit Config Hostname (Highest Priority)
+  const hostConfMatches = [...text.matchAll(/(?:^|\n)\s*set\s+hostname\s+["']?([^"'\r\n]+?)["']?\s*(?:\n|$)/gi)];
+  for (const hm of hostConfMatches) {
+    const norm = normalizeApplianceName(hm[1], "");
+    if (norm && norm !== ":" && !/^(?:FortiGate|FortiGate-\w+)$/i.test(norm)) return norm;
+  }
+  // Second pass for default FortiGate names if custom wasn't found
+  for (const hm of hostConfMatches) {
+    const norm = normalizeApplianceName(hm[1], "");
+    if (norm && norm !== ":") return norm;
+  }
+
+  // 2. Live/event logs or syslog tags
   const logMatches = [...text.matchAll(/(?:^|\s|,|;)(?:appliance|devname|device|dname)\s*[:=]\s*["']?([^"'\r\n\s,;]+)["']?/gi)];
   for (const lm of logMatches) {
     const norm = normalizeApplianceName(lm[1], "");
     if (norm && norm !== ":" && norm !== "Primary-FW") return norm;
   }
 
-  // 2. Configuration file: set hostname or hostname (bounded to avoid matching server-hostname)
-  const hostConfMatches = [...text.matchAll(/(?:set\s+hostname|(?<![\w-])hostname)\s+["']?([^"'\r\n\s]+)["']?/gi)];
-  for (const hm of hostConfMatches) {
-    const norm = normalizeApplianceName(hm[1], "");
-    if (norm && norm !== ":" && !/^(?:FortiGate|FortiGate-\w+)$/i.test(norm)) return norm;
-    if (norm && norm !== ":") return norm;
-  }
-
-  // 3. CLI status: Hostname: servername or Appliance: servername
+  // 3. CLI status
   const hostCliMatches = [...text.matchAll(/(?:^|\n)\s*(?:Hostname|Appliance)\s*:\s*([^\r\n\s]+)/gi)];
   for (const cm of hostCliMatches) {
     const norm = normalizeApplianceName(cm[1], "");
     if (norm && norm !== ":") return norm;
   }
 
-  // 4. CLI prompt extraction: e.g. "FW-01 #" or "Branch-FW (root) #"
+  // 4. CLI prompt extraction
   const promptMatches = [...text.matchAll(/(?:^|\n)\s*([A-Za-z0-9_.-]+)(?:\s*\([^)]+\))?\s*#/g)];
   for (const pm of promptMatches) {
     const candidate = pm[1].trim();
@@ -122,19 +126,19 @@ extractDeviceIdentity.getAll = function (text) {
   if (!text) return [];
   const found = new Set();
 
-  // 1. Live/event logs or syslog tags: appliance=servername, devname=servername, device=servername
-  const logMatches = [...text.matchAll(/(?:^|\s|,|;)(?:appliance|devname|device|dname)\s*[:=]\s*["']?([^"'\r\n\s,;]+)["']?/gi)];
-  for (const lm of logMatches) {
-    const norm = normalizeApplianceName(lm[1], "");
-    if (norm && norm !== ":" && norm !== "Primary-FW") found.add(norm);
-  }
-
-  // 2. Configuration file: set hostname or hostname (bounded to avoid matching server-hostname)
-  const hostConfMatches = [...text.matchAll(/(?:set\s+hostname|(?<![\w-])hostname)\s+["']?([^"'\r\n\s]+)["']?/gi)];
+  // 1. Explicit Config Hostname (Highest Priority)
+  const hostConfMatches = [...text.matchAll(/(?:^|\n)\s*set\s+hostname\s+["']?([^"'\r\n]+?)["']?\s*(?:\n|$)/gi)];
   for (const hm of hostConfMatches) {
     const norm = normalizeApplianceName(hm[1], "");
     if (norm && norm !== ":" && !/^(?:FortiGate|FortiGate-\w+)$/i.test(norm)) found.add(norm);
     else if (norm && norm !== ":") found.add(norm);
+  }
+
+  // 2. Live/event logs or syslog tags: appliance=servername, devname=servername, device=servername
+  const logMatches = [...text.matchAll(/(?:^|\s|,|;)(?:appliance|devname|device|dname)\s*[:=]\s*["']?([^"'\r\n\s,;]+)["']?/gi)];
+  for (const lm of logMatches) {
+    const norm = normalizeApplianceName(lm[1], "");
+    if (norm && norm !== ":" && norm !== "Primary-FW") found.add(norm);
   }
 
   // 3. CLI status: Hostname: servername or Appliance: servername
@@ -362,7 +366,7 @@ function makeFinding(optionsOrId, ...args) {
       status = "INFO",
       category,
       source,
-      deviceId = "Primary-FW",
+      deviceId = "",
       deviceName = "",
       diagnosticCmd = "",
       targetConfig = "",
@@ -378,7 +382,7 @@ function makeFinding(optionsOrId, ...args) {
 
     const assignedDevId = normalizeApplianceName(
       optionsOrId.appliance || deviceId || deviceName,
-      "Primary-FW"
+      "" // <--- Removed "Primary-FW" so runAnalysisForDevice can inject the real hostname
     );
 
     const mappedAltId = altId || (
@@ -409,7 +413,7 @@ function makeFinding(optionsOrId, ...args) {
       deviceName: assignedDevId,
       appliance: assignedDevId,
       diagnosticCmd: diagnosticCmd || DIAGNOSTIC_COMMANDS[id] || (mappedAltId ? DIAGNOSTIC_COMMANDS[mappedAltId] : "") || "",
-      targetConfig: targetConfig || (typeof getFindingTargetConfig === "function" ? getFindingTargetConfig({ id }) : "") || "",
+      targetConfig: targetConfig || getFindingTargetConfig({ id }),
       data: data || {},
       remediationCli: remediationCli || "",
       actionText: actionText || "",
@@ -466,11 +470,11 @@ function makeFinding(optionsOrId, ...args) {
       status,
       category: category || (id.startsWith("CIS-") ? "CIS Benchmark" : (id.startsWith("SEC-") ? "Security & Hardening" : "SecOps Operational")),
       source,
-      deviceId: "Primary-FW",
-      deviceName: "Primary-FW",
-      appliance: "Primary-FW",
+      deviceId: "", // <--- Removed "Primary-FW"
+      deviceName: "",
+      appliance: "",
       diagnosticCmd: DIAGNOSTIC_COMMANDS[id] || (mappedAltId ? DIAGNOSTIC_COMMANDS[mappedAltId] : "") || "",
-      targetConfig: targetConfig || (typeof getFindingTargetConfig === "function" ? getFindingTargetConfig({ id }) : "") || "",
+      targetConfig: targetConfig || getFindingTargetConfig({ id }),
       data: {},
       remediationCli: remediationCli || "",
       actionText: actionText || "",
