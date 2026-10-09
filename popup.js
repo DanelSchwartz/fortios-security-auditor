@@ -232,6 +232,7 @@ const DIAGNOSTIC_COMMANDS = {
   "SEC-SESS-01": "diagnose firewall auth list",
   "FAZ-HIGH-01": "diagnose fortilogd lograte-device",
   "FAZ-FWD-01": "diagnose fortilogd lograte-device",
+  "FAZ-FWD-02": "diagnose fortilogd lograte-device",
   "FAZ-CRIT-01": "diagnose system raid status",
   "FAZ-DISK-01": "diagnose system raid status",
   "FGT-SYS-01": "get system status",
@@ -329,6 +330,7 @@ function getFindingTargetConfig(f) {
     "SEC-SESS-01": "diagnose firewall auth list",
     "FAZ-HIGH-01": "diagnose fortilogd lograte-device",
     "FAZ-FWD-01": "diagnose fortilogd lograte-device",
+    "FAZ-FWD-02": "diagnose fortilogd lograte-device",
     "FAZ-CRIT-01": "diagnose system raid status",
     "FAZ-DISK-01": "diagnose system raid status",
     "FGT-SYS-01": "get system status",
@@ -859,14 +861,12 @@ function detectInputKind(text) {
 function checkFgtSystemUptime(text) {
   const hasUptimeHeader =
     hasCommand(text, "get system status") ||
-    /(?:System\s+)?[Uu]ptime\s*:/i.test(text);
+    /^\s*(?:System\s+)?[Uu]ptime\s*:/im.test(text);
 
   if (!hasUptimeHeader) return null;
 
-  const uptimeMatch =
-    /(?:System\s+)?[Uu]ptime\s*:?\s*([0-9]+\s*days?(?:[,\s]+[0-9]+\s*hours?)?(?:[,\s]+[0-9]+\s*min(?:ute)?s?)?|[0-9]+\s*hours?(?:[,\s]+[0-9]+\s*min(?:ute)?s?)?|[0-9]+\s*min(?:ute)?s?)/i.exec(
-      text
-    );
+  // Use multiline start anchor (^) to prevent matching "Cluster Uptime:"
+  const uptimeMatch = /^\s*(?:System\s+)?[Uu]ptime\s*:\s*([0-9]+\s*days?,?\s*[0-9]+\s*hours?(?:,?\s*[0-9]+\s*minutes?)?|[0-9]+\s*hours?,?\s*[0-9]+\s*minutes?|[0-9]+\s*min(?:ute)?s?)/im.exec(text);
 
   if (!uptimeMatch) return null;
 
@@ -3177,6 +3177,10 @@ function checkFazActiveDevices(text) {
 
   for (const line of lines) {
     if (!/^\s*\d+\s+\S+/.test(line)) continue;
+    
+    // Ignore raw Syslog/SSL-Syslog feeds that are not managed OFTP devices
+    if (/SSL-Syslog|syslog\s+\d+$/i.test(line)) continue;
+
     const ipMatch = /\d{1,3}(?:\.\d{1,3}){3}/.exec(line);
     if (!ipMatch) continue;
     const ip = ipMatch[0];
@@ -4648,6 +4652,44 @@ function checkFazSilentForwarder(text) {
     targetConfig: "diagnose fortilogd lograte-device",
     source: "cli"
   });
+}
+
+/**
+ * FAZ-FWD-02: FortiAnalyzer Log Forwarding Queue Lag
+ * Captures asynchronous console/event log warnings regarding SIEM forwarding bottlenecks.
+ * Example: Log-forward 'ld-Qradar_SIEM' lag behind 99.82%, discarded 0bytes.
+ */
+function checkFazLogForwarderLag(text) {
+  if (!isFazOutput(text)) return null;
+
+  const lagMatches = [...text.matchAll(/Log-forward\s+['"]?([^'"]+)['"]?\s+lag\s+behind\s+([0-9.]+)%/gi)];
+  
+  if (lagMatches.length === 0) return null;
+
+  const affectedTargets = [];
+  let highestLag = 0;
+
+  for (const m of lagMatches) {
+    const targetName = m[1];
+    const lagPct = parseFloat(m[2]);
+    if (lagPct > highestLag) highestLag = lagPct;
+    affectedTargets.push(`'${targetName}' (${lagPct}%)`);
+  }
+
+  const uniqueTargets = [...new Set(affectedTargets)];
+  
+  if (highestLag > 0) {
+    return makeFinding({
+      id: "FAZ-FWD-02",
+      component: "Log Forwarding SIEM Queue",
+      status: highestLag >= 90 ? "FAIL" : "WARN",
+      findingText: `Critical logging queue backlog detected! FortiAnalyzer is unable to transmit logs to external SIEM/Syslog targets fast enough. Affected targets: ${uniqueTargets.join(", ")}. Log discarding (data loss) is imminent if queue fills.`,
+      actionText: "Investigate network bandwidth limitations, routing issues, or high latency between the FortiAnalyzer and the remote SIEM. Verify if the SIEM is dropping packets or throttling ingestion.",
+      source: "cli"
+    });
+  }
+  
+  return null;
 }
 
 function checkFazRaidHealth(text) {
@@ -8920,6 +8962,7 @@ const ALL_CHECKS = [
   { id: "OPS-DNS-01", run: (text) => checkOpsRatingServers(text) },
   { id: "OPS-BGP-01", run: (text) => checkOpsBgpDampening(text) },
   { id: "FAZ-FWD-01", run: (text) => checkFazSilentForwarder(text) },
+  { id: "FAZ-FWD-02", run: (text) => checkFazLogForwarderLag(text) },
   { id: "FAZ-DISK-01", run: (text) => checkFazRaidHealth(text) },
   { id: "OPS-HA-02", run: (text) => checkOpsHaClusterChecksum(text) },
   { id: "OPS-SYS-04", run: (text) => checkOpsProcessCpu(text) },
