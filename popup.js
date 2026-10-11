@@ -6871,8 +6871,15 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       });
     }
 
-    // Case 3: Explicit 'all' global access
-    if (allTokens.some((t) => t.toLowerCase() === "all" || t.toLowerCase() === "all_ipv4")) {
+    // FIX: Determine effective perimeter scope
+    // In FortiOS, the top-level 'source-address' under 'config vpn ssl settings' is the primary gate.
+    // If top-level explicitly restricts IPs/Countries, an inner authentication-rule set to "all" 
+    // CANNOT widen the perimeter to the whole world.
+    const topHasAll = topTokens.some((t) => t.toLowerCase() === "all" || t.toLowerCase() === "all_ipv4");
+    const authHasAll = authRuleTokens.some((t) => t.toLowerCase() === "all" || t.toLowerCase() === "all_ipv4");
+
+    // Case 3: Explicit 'all' global access ONLY if the primary perimeter is truly unrestricted
+    if (topHasAll || (topTokens.length === 0 && authHasAll)) {
       const findingText = buildSecVpn01ObservedState({
         configStatus: "Explicitly set to 'all'",
         geoObjectsList: [],
@@ -6896,12 +6903,14 @@ function checkSecSslVpnGeoFencing(tokenizer, rawText = "") {
       });
     }
 
-    // Case 4: Resolve Address Groups & Addresses Recursively
+    // Case 4: Resolve Address Groups & Addresses Recursively using top-level perimeter tokens
     const addrMap = getFirewallAddressMap(tokenizer, rawText, vdom);
     const grpMap = getFirewallAddrGroupMap(tokenizer, rawText, vdom);
 
+    // Only process the restrictive tokens (top priority) or auth tokens if top is empty
+    const tokensToEvaluate = topTokens.length > 0 ? topTokens : authRuleTokens;
     const expandedTokens = [];
-    for (const t of allTokens) {
+    for (const t of tokensToEvaluate) {
       const visited = new Set();
       const leafMembers = resolveAddrGroupMembersRecursive(t, grpMap, visited);
       if (leafMembers.length > 0) {
@@ -8858,21 +8867,15 @@ function deduplicateFindings(rawFindings) {
       highestItems.find((item) => item.source === "cli") ||
       highestItems[0];
 
-    // 3. Merge unique details cleanly (strictly within the same status to prevent cross-status corruption)
+    // 3. Select the most detailed finding text (prevent massive text walls from concatenation)
     const sameStatusItems = highestItems.filter((item) => item.status === preferred.status);
-    const uniqueFindingTexts = [
-      ...new Set(sameStatusItems.map((item) => (item.findingText || "").trim()).filter(Boolean)),
-    ];
-
-    let mergedFindingText = preferred.findingText || "";
-    if (uniqueFindingTexts.length > 1) {
-      const others = uniqueFindingTexts.filter(
-        (t) => t !== preferred.findingText && !preferred.findingText.includes(t)
-      );
-      if (others.length > 0) {
-        mergedFindingText = `${preferred.findingText} (Additional Source: ${others.join("; ")})`;
+    let bestText = preferred.findingText || "";
+    for (const item of sameStatusItems) {
+      if ((item.findingText || "").length > bestText.length) {
+        bestText = item.findingText;
       }
     }
+    const mergedFindingText = bestText;
 
     // Merge SOC Action
     const actions = list.map((item) => item.actionText).filter(Boolean);
